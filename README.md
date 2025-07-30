@@ -65,8 +65,7 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 
 ## Known Issues/Limitations
 - For now, only supporting Windows OS and Python 3.10 - 3.12
-- When using `gpt-4o-transcribe`, the end of a transcription may occasionally be cut off - this is a [known model issue](https://community.openai.com/t/
-gpt-4o-transcribe-truncates-the-transcript/1148347). A workaround is in place to minimize this, but if it occurs, use the Retry Last Transcription and see the [Troubleshooting Guide](TROUBLESHOOTING.md).
+- When using `gpt-4o-transcribe`, the end of a transcription may occasionally be cut off - this is a [known model issue](https://community.openai.com/t/gpt-4o-transcribe-truncates-the-transcript/1148347). A workaround is in place to minimize this, but if it occurs, use the Retry Last Transcription and see the [Troubleshooting Guide](TROUBLESHOOTING.md).
 - When using the `gpt-4o-transcribe` model to transcribe spoken instructions, sometimes it responds to them or carries them out.
 - Untested update mechanism ([let me know if it doesn't work](https://github.com/jason-m-hicks/better-voice-typing/issues))
 - Recordings may not produce transcriptions if your microphone's audio level is too low
@@ -140,12 +139,12 @@ CUSTOM_STT_API_KEY="your-api-key-here"
    - Navigate to the folder: `cd "path\to\extracted\better-voice-typing"`
    - Run: `setup.bat` (Command Prompt) or `.\setup.bat` (PowerShell)
    - This will create a virtual environment, install packages, and set up default configuration
-   - If you encounter any instillation issues, please [report them](https://github.com/Elevate-Code/better-voice-typing/issues)
+   - If you encounter any installation issues, please [report them](https://github.com/Elevate-Code/better-voice-typing/issues)
 4. Open the `.env` file in Notepad, update the following and save:
    - OpenAI API key ([get one here](https://platform.openai.com/api-keys))
    - (Optional) Anthropic API key for text cleaning
 5. Launch the application by double-clicking the `run_voice_typing.bat` file in the application folder
-6. ⚠️ Ensure the app's tray icon is visible by right-clicking the taskbar → "Taskbar settings" → "Select which icons appear on the taskbar" → Toggle on for Voice Typing Assistant
+6. 💡 Ensure the app's tray icon is visible by right-clicking the taskbar → "Taskbar settings" → "Select which icons appear on the taskbar" → Toggle on for Voice Typing Assistant
 7. Right-click `run_voice_typing.bat` → Send to → Desktop to create a shortcut
 
 **(Optional) Fine-tune transcript cleaning**
@@ -208,10 +207,13 @@ Want to request a feature or report a bug? [Create an issue](https://github.com/
 - [x] Update and improve README.md
 - [ ] Some warning or auto-stop if recording duration is going to be too long (due to 25MB API limits)
 - [ ] Add support for more speech-to-text providers (Google Cloud implementation in progress)
-- [ ] Since text cleaning isn't needed with gpt-4o-transcribe, pivot it to be "post-processing" and allow user to customize the prompt
+- [ ] add support for using a local whisper model via direct integration or local API server
+- [ ] Do some performance profiling and consider adding some lightweight audio compression
 - [ ] Customizable activation shortcuts for recording control
+- [ ] Since text cleaning isn't needed with gpt-4o-transcribe, pivot it to be "post-processing" and allow user to customize the prompt
+- [ ] Add user-configurable translation mode (eg. "English to {language}")
+- [ ] Add user-configurable post-processing mode (eg. "Turn my rambling thoughts into an elegant email")
 - [ ] Improved transcription accuracy via VLM for code variables, proper nouns and abbreviations using screenshot context and cursor position
-- [ ] Add support for translation?
 
 ## Contributing
 
