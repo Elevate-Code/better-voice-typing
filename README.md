@@ -36,7 +36,7 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
   - Clean Transcription: Enable/disable further refinement of the transcription using a configurable LLM.
   - Silent-Start Timeout: Cancels the recording if no sound is detected within the first few seconds, preventing accidental recordings.
   - Recording Indicator: Customize the on-screen size and position of the recording indicator.
-  - Speech-to-Text: Select your STT provider (OpenAI, Google Cloud) and model (Whisper, GPT-4o, GPT-4o Mini).
+  - Speech-to-Text: Select your STT provider (OpenAI, Google Cloud, Custom/Local) and model (Whisper, GPT-4o, GPT-4o Mini, or custom).
 - Restart: Quickly restart the application, like when it's not responding to the keyboard shortcut.
 
 ### Tray History
@@ -53,13 +53,15 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 | `silent_start_timeout` | Duration in seconds to wait for sound at the beginning of a recording before automatically canceling. Set to `null` to disable. | `4.0` | `2.0` to `5.0` |
 | `silence_threshold` | The audio level (RMS) below which sound is considered silence. Lower values are more sensitive. | `0.01` | `0.005` (very quiet) to `0.02` (noisier) |
 | `log_retention_days` | Number of days to keep log files. | `60` | `14`, `90`, `null` (indefinitely) |
-| `stt_provider` | The speech-to-text service to use. | `"openai"` | `"openai"`, `"google"` |
+| `stt_provider` | The speech-to-text service to use. | `"openai"` | `"openai"`, `"google"`, `"custom"` |
+| `custom_stt_base_url` | Base URL for custom/local STT server. | `"http://localhost:8000"` | Any local or remote URL |
+| `custom_stt_model` | Model name for custom STT server. | `"parakeet-tdt-0.6b-v2"` | Model supported by your server |
 | `openai_stt_model` | The specific model to use for OpenAI's service. `gpt-4o-transcribe` is recommended for highest accuracy. | `"gpt-4o-transcribe"` | `"gpt-4o-transcribe"`, `"gpt-4o-mini-transcribe"` |
 
 ## Technical Details
 - Minimal UI built with Python tkinter
-- Multi-provider Speech-to-Text support with OpenAI GPT-4o models and Whisper
-- Extensible architecture for adding new STT providers (Google Cloud, Azure, etc.)
+- Multi-provider Speech-to-Text support with OpenAI GPT-4o models, Whisper, and custom local/remote servers
+- Extensible architecture for adding new STT providers (Google Cloud, Azure, local models, etc.)
 
 ## Known Issues/Limitations
 - For now, only supporting Windows OS and Python 3.10 - 3.12
@@ -75,6 +77,54 @@ gpt-4o-transcribe-truncates-the-transcript/1148347). A workaround is in place to
 For solutions to common problems, see the [**Troubleshooting Guide**](TROUBLESHOOTING.md).
 
 You can find detailed application logs in `C:\Users\{YourUsername}\Documents\VoiceTyping\logs`.
+
+## Using Custom/Local Speech-to-Text
+
+The Voice Typing Assistant supports connecting to custom Speech-to-Text servers, whether local or remote. This allows you to:
+- Use locally running models for privacy
+- Connect to custom STT servers
+- Use alternative STT providers not directly integrated
+- Run OpenAI-compatible APIs locally
+
+(As an example you can use parakeet+fastapi docker: `docker run -d -p 8000:8000 viktor742/openapi-parakeet-tdt-0.6b-v2:0.2.1`)
+
+### Configuration
+
+1. **Via Settings Menu**: Right-click the tray icon → Settings → Speech-to-Text → Provider → Select "Custom STT"
+
+2. **Via settings.json**: Edit the `modules/settings.json` file:
+```json
+{
+  "stt_provider": "custom",
+  "custom_stt_base_url": "http://localhost:8000",
+  "custom_stt_model": "parakeet-tdt-0.6b-v2"
+}
+```
+
+3. **Changing the URL and Model**:
+   - `custom_stt_base_url`: Set this to your STT server's base URL (e.g., `http://localhost:8000`, `http://192.168.1.100:5000`)
+   - `custom_stt_model`: Set this to the model name your server expects (optional, depends on server)
+
+### Compatible Servers
+
+The custom provider works with various endpoint formats:
+- OpenAI-compatible endpoints at `/v1/audio/transcriptions`
+- Simple endpoints at `/transcribe` or `/api/transcribe`
+
+The server should accept:
+- A multipart form POST request
+- A field named `file` containing the audio data (WAV format)
+- Returns JSON with the transcription in one of these formats:
+  - `{"segments": [{"text": "transcribed text"}]}` (segmented format)
+  - `{"text": "transcribed text"}` (OpenAI format)
+  - `{"transcription": "transcribed text"}` (alternative format)
+
+### Optional Authentication
+
+If your server requires authentication, set the `CUSTOM_STT_API_KEY` environment variable in your `.env` file:
+```
+CUSTOM_STT_API_KEY="your-api-key-here"
+```
 
 ## Setup/Installation - For Users
 

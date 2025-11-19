@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 # Import all provider classes
 from services.openai_stt import OpenAITranscriber
 from services.google_stt import GoogleTranscriber
+from services.custom_stt import CustomTranscriber
 from modules.settings import Settings
 
 # OpenAI Speech to text docs: https://platform.openai.com/docs/guides/speech-to-text
@@ -41,6 +42,11 @@ def _get_transcriber(provider_name: str):
     elif provider_name == "google":
         language = settings.get('google_stt_language') or 'en-US'
         return GoogleTranscriber(language=language)
+    elif provider_name == "custom":
+        base_url = settings.get('custom_stt_base_url') or 'http://localhost:8000'
+        model = settings.get('custom_stt_model') or 'parakeet-tdt-0.6b-v2'
+        language = settings.get('stt_language') or 'en'
+        return CustomTranscriber(base_url=base_url, model=model, language=language)
     # Add other providers here as needed
     else:
         raise ValueError(f"Unknown STT provider: {provider_name}")
@@ -133,6 +139,14 @@ def get_available_providers() -> list:
             'display_name': 'Google Cloud',
             'models': []  # Google doesn't have selectable models in same way
         })
+    
+    # Custom STT provider is always available (for local or remote models)
+    providers.append({
+        'name': 'custom',
+        'display_name': 'Custom STT',
+        'models': ['parakeet-tdt-0.6b-v2', 'whisper', 'faster-whisper'],  # Common models
+        'configurable': True  # Indicates URL and model can be configured
+    })
 
     return providers
 
