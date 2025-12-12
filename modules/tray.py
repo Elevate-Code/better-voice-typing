@@ -1,6 +1,10 @@
 import os
 import threading
-from typing import Any, Dict
+import ctypes
+import ctypes.wintypes
+import time
+import logging
+from typing import Any, Dict, Optional, Callable
 
 import pyperclip
 import pystray
@@ -8,6 +12,13 @@ from PIL import Image, ImageDraw
 
 from modules.audio_manager import get_input_devices, get_default_device_id, set_input_device, create_device_identifier
 from modules import transcribe
+
+# Windows constants for TaskbarCreated message
+WM_USER = 0x0400
+ICON_WATCHDOG_INTERVAL = 30  # Check icon health every 30 seconds
+ICON_RESTART_DELAY = 2  # Wait 2 seconds before restarting icon after failure
+
+logger = logging.getLogger(__name__)
 
 def create_tray_icon(icon_path: str) -> Image.Image:
     """Create tray icon from file path"""
@@ -177,65 +188,81 @@ def create_stt_provider_menu(app):
 
     return menu_items
 
-def setup_tray_icon(app):
-    # Create a single icon instance
-    icon = pystray.Icon(
-        'Voice Typing',
-        icon=create_tray_icon('assets/microphone-blue.png')
-    )
 
-    def update_icon(emoji_prefix: str, tooltip_text: str) -> None:
-        """Update both the tray icon and tooltip"""
+class TrayIconManager:
+    """
+    Manages the system tray icon with automatic recovery from failures.
+
+    Handles:
+    - Creating and running the tray icon
+    - Automatic restart on thread crash
+    - Periodic health checks (watchdog)
+    - Recovery from Explorer.exe restart
+    """
+
+    def __init__(self, app):
+        self.app = app
+        self.icon: Optional[pystray.Icon] = None
+        self.icon_thread: Optional[threading.Thread] = None
+        self.watchdog_thread: Optional[threading.Thread] = None
+        self.running = False
+        self.icon_lock = threading.Lock()
+        self.restart_count = 0
+        self.last_restart_time = 0
+
+        # Register for TaskbarCreated message (for Explorer restart detection)
+        self._taskbar_created_msg = self._register_taskbar_created_message()
+
+    def _register_taskbar_created_message(self) -> int:
+        """Register the TaskbarCreated window message."""
         try:
-            # Update icon image from current status config
-            icon.icon = create_tray_icon(app.status_manager.current_config.tray_icon_file)
-            # Update tooltip with status message
-            icon.title = f"{emoji_prefix} {tooltip_text}"
+            RegisterWindowMessage = ctypes.windll.user32.RegisterWindowMessageW
+            RegisterWindowMessage.argtypes = [ctypes.wintypes.LPCWSTR]
+            RegisterWindowMessage.restype = ctypes.wintypes.UINT
+            msg_id = RegisterWindowMessage("TaskbarCreated")
+            logger.debug(f"Registered TaskbarCreated message: {msg_id}")
+            return msg_id
         except Exception as e:
-            print(f"Error updating tray icon: {e}")
+            logger.warning(f"Failed to register TaskbarCreated message: {e}")
+            return 0
 
-    # Store the update function in the app
-    app.update_tray_tooltip = update_icon
+    def _create_icon(self) -> pystray.Icon:
+        """Create a new tray icon instance."""
+        icon = pystray.Icon(
+            'Voice Typing',
+            icon=create_tray_icon('assets/microphone-blue.png')
+        )
+        icon.menu = self._get_menu()
+        return icon
 
-    def copy_latest_transcription(icon, item) -> None:
-        """
-        Copies the most recent transcription to clipboard if available.
-        """
-        recent_texts = app.history.get_recent()
-        if recent_texts:
-            pyperclip.copy(recent_texts[0])
-
-    def change_ui_position(new_pos: str):
-        """Update settings and move indicator to new corner."""
-        app.settings.set('ui_indicator_position', new_pos)
-        app.ui_feedback.set_position(new_pos)
-        # Refresh menu to update checkmarks
-        if hasattr(app, 'update_icon_menu') and app.update_icon_menu:
-            app.update_icon_menu()
-
-    def change_ui_size(new_size: str):
-        """Update settings and resize indicator."""
-        app.settings.set('ui_indicator_size', new_size)
-        app.ui_feedback.set_size(new_size)
-        # Refresh menu to update checkmarks
-        if hasattr(app, 'update_icon_menu') and app.update_icon_menu:
-            app.update_icon_menu()
-
-    def on_exit(icon, item):
-        """Log exit and close the application."""
-        app.logger.info("Application exiting.")
-        icon.stop()
-        # Ensure clean exit of the application
-        os._exit(0)
-
-    def get_menu():
-        # Dynamic menu that updates when called
+    def _get_menu(self):
+        """Generate the context menu for the tray icon."""
+        app = self.app
         copy_menu = create_copy_menu(app)
         microphone_menu = create_microphone_menu(app)
-        stt_menu = create_stt_provider_menu(app)  # Add STT provider menu
+        stt_menu = create_stt_provider_menu(app)
+
+        def copy_latest_transcription(icon, item) -> None:
+            recent_texts = app.history.get_recent()
+            if recent_texts:
+                pyperclip.copy(recent_texts[0])
+
+        def change_ui_position(new_pos: str):
+            app.settings.set('ui_indicator_position', new_pos)
+            app.ui_feedback.set_position(new_pos)
+            self.update_menu()
+
+        def change_ui_size(new_size: str):
+            app.settings.set('ui_indicator_size', new_size)
+            app.ui_feedback.set_size(new_size)
+            self.update_menu()
+
+        def on_exit(icon, item):
+            app.logger.info("Application exiting.")
+            self.stop()
+            os._exit(0)
 
         return pystray.Menu(
-            # ↓ This is now the default item, triggered on left-click.
             pystray.MenuItem(
                 'Copy Last Transcription',
                 copy_latest_transcription,
@@ -261,11 +288,6 @@ def setup_tray_icon(app):
                 'Settings',
                 pystray.Menu(
                     pystray.MenuItem(
-                        'Continuous Capture',
-                        lambda icon, item: None,
-                        checked=lambda item: app.settings.get('continuous_capture')
-                    ),
-                    pystray.MenuItem(
                         'Clean Transcription',
                         lambda icon, item: app.toggle_clean_transcription(),
                         checked=lambda item: app.settings.get('clean_transcription')
@@ -283,7 +305,6 @@ def setup_tray_icon(app):
                     pystray.MenuItem(
                         'Recording Indicator',
                         pystray.Menu(
-                            # Size options
                             pystray.MenuItem(
                                 'Normal Size',
                                 lambda icon, item: change_ui_size('normal'),
@@ -295,7 +316,6 @@ def setup_tray_icon(app):
                                 checked=lambda item: app.settings.get('ui_indicator_size') == 'mini'
                             ),
                             pystray.Menu.SEPARATOR,
-                            # Position options
                             pystray.MenuItem(
                                 'Top Left',
                                 lambda icon, item: change_ui_position('top-left'),
@@ -328,7 +348,7 @@ def setup_tray_icon(app):
                             ),
                         )
                     ),
-                    pystray.MenuItem(  # Add STT submenu
+                    pystray.MenuItem(
                         'Speech-to-Text',
                         pystray.Menu(*stt_menu)
                     )
@@ -338,10 +358,139 @@ def setup_tray_icon(app):
             pystray.MenuItem('Exit', on_exit)
         )
 
-    # Initial menu setup
-    icon.menu = get_menu()
-    # Store the update function in the app to call it from elsewhere
-    app.update_icon_menu = lambda: setattr(icon, 'menu', get_menu()) # Updates the tray icon's menu
+    def update_menu(self) -> None:
+        """Update the tray icon's menu."""
+        with self.icon_lock:
+            if self.icon:
+                try:
+                    self.icon.menu = self._get_menu()
+                except Exception as e:
+                    logger.warning(f"Failed to update menu: {e}")
 
-    # Start the icon's event loop in its own thread
-    threading.Thread(target=icon.run).start()
+    def update_icon(self, emoji_prefix: str, tooltip_text: str) -> None:
+        """Update both the tray icon image and tooltip."""
+        with self.icon_lock:
+            if self.icon:
+                try:
+                    self.icon.icon = create_tray_icon(
+                        self.app.status_manager.current_config.tray_icon_file
+                    )
+                    self.icon.title = f"{emoji_prefix} {tooltip_text}"
+                except Exception as e:
+                    logger.warning(f"Failed to update tray icon: {e}")
+
+    def _run_icon(self) -> None:
+        """Run the tray icon with exception handling."""
+        while self.running:
+            try:
+                with self.icon_lock:
+                    self.icon = self._create_icon()
+
+                logger.info("Tray icon starting")
+                self.icon.run()
+
+                # If we get here, icon.run() returned normally (icon was stopped)
+                logger.info("Tray icon stopped normally")
+                break
+
+            except Exception as e:
+                logger.error(f"Tray icon crashed: {e}", exc_info=True)
+
+                with self.icon_lock:
+                    self.icon = None
+
+                if not self.running:
+                    break
+
+                # Rate limit restarts
+                current_time = time.time()
+                if current_time - self.last_restart_time < 10:
+                    self.restart_count += 1
+                else:
+                    self.restart_count = 1
+                self.last_restart_time = current_time
+
+                if self.restart_count > 5:
+                    logger.error("Tray icon crashed too many times, giving up")
+                    break
+
+                logger.info(f"Restarting tray icon in {ICON_RESTART_DELAY}s (attempt {self.restart_count})")
+                time.sleep(ICON_RESTART_DELAY)
+
+    def _watchdog(self) -> None:
+        """Periodically check if the tray icon is healthy and restart if needed."""
+        logger.info("Tray icon watchdog started")
+
+        while self.running:
+            time.sleep(ICON_WATCHDOG_INTERVAL)
+
+            if not self.running:
+                break
+
+            with self.icon_lock:
+                icon_exists = self.icon is not None
+                thread_alive = self.icon_thread and self.icon_thread.is_alive()
+
+            if not icon_exists or not thread_alive:
+                logger.warning("Watchdog detected tray icon is dead, restarting...")
+                self._restart_icon()
+
+    def _restart_icon(self) -> None:
+        """Restart the tray icon."""
+        with self.icon_lock:
+            # Stop existing icon if any
+            if self.icon:
+                try:
+                    self.icon.stop()
+                except Exception:
+                    pass
+                self.icon = None
+
+        # Wait for old thread to finish
+        if self.icon_thread and self.icon_thread.is_alive():
+            self.icon_thread.join(timeout=2)
+
+        # Start new icon thread
+        if self.running:
+            self.icon_thread = threading.Thread(target=self._run_icon, daemon=True)
+            self.icon_thread.start()
+            logger.info("Tray icon restarted by watchdog")
+
+    def start(self) -> None:
+        """Start the tray icon and watchdog."""
+        self.running = True
+
+        # Start the icon thread
+        self.icon_thread = threading.Thread(target=self._run_icon, daemon=True)
+        self.icon_thread.start()
+
+        # Start the watchdog thread
+        self.watchdog_thread = threading.Thread(target=self._watchdog, daemon=True)
+        self.watchdog_thread.start()
+
+        logger.info("Tray icon manager started")
+
+    def stop(self) -> None:
+        """Stop the tray icon and watchdog."""
+        logger.info("Stopping tray icon manager")
+        self.running = False
+
+        with self.icon_lock:
+            if self.icon:
+                try:
+                    self.icon.stop()
+                except Exception:
+                    pass
+                self.icon = None
+
+def setup_tray_icon(app):
+    """Set up the system tray icon with automatic recovery."""
+    manager = TrayIconManager(app)
+
+    # Store references on app for external access
+    app.tray_manager = manager
+    app.update_tray_tooltip = manager.update_icon
+    app.update_icon_menu = manager.update_menu
+
+    # Start the tray icon
+    manager.start()

@@ -6,7 +6,6 @@ class Settings:
     def __init__(self) -> None:
         self.settings_file: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
         self.default_settings: Dict[str, Any] = {
-            'continuous_capture': True,
             'smart_capture': False,
             'silent_start_timeout': 4.0,
             'silence_threshold': 0.01,  # RMS threshold for silence detection (0.01 = -40dB)
@@ -37,11 +36,24 @@ class Settings:
         """Runs all necessary setting migrations and saves if changes were made."""
         migrations_run = [
             self._migrate_device_settings(),
-            self._migrate_silence_timeout()
+            self._migrate_silence_timeout(),
+            self._migrate_obsolete_settings()
         ]
 
         if any(migrations_run):
             self.save_settings()
+
+    def _migrate_obsolete_settings(self) -> bool:
+        """Removes obsolete settings keys. Returns True if changes were made."""
+        obsolete_keys = ['continuous_capture']
+        changes_made = False
+        
+        for key in obsolete_keys:
+            if key in self.current_settings:
+                self.current_settings.pop(key)
+                changes_made = True
+                
+        return changes_made
 
     def _migrate_silence_timeout(self) -> bool:
         """Renames 'silence_timeout' to 'silent_start_timeout'. Returns True if changes were made."""

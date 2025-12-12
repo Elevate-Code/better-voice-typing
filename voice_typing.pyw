@@ -57,6 +57,9 @@ class VoiceTypingApp:
         )
         self.ui_feedback.set_click_callback(self.handle_ui_click)
         self.recording = False
+
+        # Initialize last_recording from existing temp file if present (allows retry after restart)
+        self.last_recording = self.recorder.filename if os.path.exists(self.recorder.filename) else None
         self.ctrl_pressed = False
         self.clean_transcription_enabled = self.settings.get('clean_transcription')
         self.history = TranscriptionHistory()

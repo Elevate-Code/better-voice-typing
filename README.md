@@ -32,7 +32,6 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
 - Recent Transcriptions: Access previous transcriptions, copy to clipboard.
 - Microphone Selection: Choose your preferred input device.
 - Settings:
-  - Continuous Capture: Default recording mode. Record audio until the user stops it, send it all at once to the STT provider.
   - Clean Transcription: Enable/disable further refinement of the transcription using a configurable LLM.
   - Silent-Start Timeout: Cancels the recording if no sound is detected within the first few seconds, preventing accidental recordings.
   - Recording Indicator: Customize the on-screen size and position of the recording indicator.

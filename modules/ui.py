@@ -106,6 +106,12 @@ class UIFeedback:
             self.frame_padding = 0
             self.label_text = "🎤 Recording (click to cancel)"
 
+    def _show_on_top(self) -> None:
+        """Show the indicator window and ensure it stays on top."""
+        self.indicator.deiconify()
+        self.indicator.attributes('-topmost', True)
+        self.indicator.lift()
+
     def _position_window(self) -> None:
         """Positions the indicator window based on the configured corner."""
         self.indicator.update_idletasks()
@@ -207,7 +213,7 @@ class UIFeedback:
         )
         self.level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
         self._position_window()
-        self.indicator.deiconify()
+        self._show_on_top()
         self.pulsing = True
         self._pulse()
         self._snap_to_content()
@@ -264,7 +270,7 @@ class UIFeedback:
             self.indicator.after_cancel(self.warning_timer)
 
         # Update appearance for warning state
-        self.indicator.deiconify()
+        self._show_on_top()
         self.indicator.configure(bg=self.warning_color)
         self.frame.configure(bg=self.warning_color)
         self.label.configure(
@@ -293,7 +299,7 @@ class UIFeedback:
         self.retry_available = True
 
         # Update appearance for error state
-        self.indicator.deiconify()
+        self._show_on_top()
         self.indicator.configure(bg=self.warning_color)
         self.frame.configure(bg=self.warning_color)
         self.label.configure(
@@ -346,13 +352,13 @@ class UIFeedback:
         # Handle visibility and animation
         if config.pulse:
             self.pulse_colors = [config.ui_color, self._darken_color(config.ui_color)]
-            self.indicator.deiconify()
+            self._show_on_top()
             self.pulsing = True
             self._pulse()
         else:
             self.pulsing = False
             if error_message:
-                self.indicator.deiconify()
+                self._show_on_top()
                 # Auto-hide after 5 seconds for errors
                 if self.warning_timer:
                     self.indicator.after_cancel(self.warning_timer)
