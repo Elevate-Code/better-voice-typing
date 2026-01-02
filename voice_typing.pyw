@@ -51,7 +51,8 @@ class VoiceTypingApp:
         silent_start_timeout = self.settings.get('silent_start_timeout')
         ui_position = self.settings.get('ui_indicator_position')
         ui_size = self.settings.get('ui_indicator_size')
-        self.ui_feedback = UIFeedback(position=ui_position, size=ui_size)
+        ui_all_displays = self.settings.get('ui_indicator_all_displays')
+        self.ui_feedback = UIFeedback(position=ui_position, size=ui_size, all_displays=ui_all_displays)
         self.recorder = AudioRecorder(
             level_callback=self.ui_feedback.update_audio_level,
             silent_start_timeout=silent_start_timeout

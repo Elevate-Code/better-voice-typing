@@ -7,7 +7,7 @@ A lightweight Python desktop app for Windows that improves upon Windows Voice Ty
 ## Overview - How it works
 
 - Press `Caps Lock` to begin recording your voice
-- A recording indicator with audio level appears (top-right corner by default)
+- A recording indicator with audio level appears on your screen(s) (position and display options configurable)
 - You can continue to navigate and type while recording, or click the recording indicator to cancel
 - Press `Caps Lock` again to stop recording and process the audio
 - The audio is sent to your chosen speech-to-text provider (OpenAI `gpt-4o-transcribe` by default)
@@ -34,7 +34,7 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
 - Settings:
   - Clean Transcription: Enable/disable further refinement of the transcription using a configurable LLM.
   - Silent-Start Timeout: Cancels the recording if no sound is detected within the first few seconds, preventing accidental recordings.
-  - Recording Indicator: Customize the on-screen size and position of the recording indicator.
+  - Recording Indicator: Customize size, position, and multi-monitor display of the recording indicator.
   - Speech-to-Text: Select your STT provider (OpenAI, Google Cloud, Custom/Local) and model (Whisper, GPT-4o, GPT-4o Mini, or custom).
 - Restart: Quickly restart the application, like when it's not responding to the keyboard shortcut.
 

@@ -25,6 +25,7 @@ class Settings:
             # UI customization
             'ui_indicator_position': 'top-right',  # 'top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center'
             'ui_indicator_size': 'normal',  # 'normal', 'mini'
+            'ui_indicator_all_displays': True,  # Show indicator on all monitors
 
             # Logging
             'log_retention_days': 60,

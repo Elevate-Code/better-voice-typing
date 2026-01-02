@@ -7,13 +7,13 @@ import pyautogui
 import pyperclip
 
 from modules.status_manager import StatusConfig
-from modules.screen_utils import get_primary_monitor_geometry
+from modules.screen_utils import get_primary_monitor_geometry, get_all_monitor_geometries, MonitorGeometry
 from modules.output_providers import get_output_provider
 
 class UIFeedback:
     pyautogui_lock = threading.Lock()
 
-    def __init__(self, position: str = 'top-right', size: str = 'normal'):
+    def __init__(self, position: str = 'top-right', size: str = 'normal', all_displays: bool = False):
         # Store desired position; fallback to default if invalid
         valid_positions = {'top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center'}
         self.position = position if position in valid_positions else 'top-right'
@@ -22,41 +22,32 @@ class UIFeedback:
         valid_sizes = {'normal', 'mini'}
         self.size = size if size in valid_sizes else 'normal'
 
+        # Store all_displays setting
+        self.all_displays = all_displays
+
         # Configure dimensions based on size
         self._configure_size_attributes()
 
-        # Create the floating window
+        # Create the root window
         self.root = tk.Tk()
-        self.root.withdraw()  # Hide initially?
-        self.indicator = tk.Toplevel(self.root)
-        self.indicator.withdraw()
+        self.root.withdraw()
 
-        # Configure the indicator window
-        self.indicator.overrideredirect(True)  # Remove window decorations
-        self.indicator.attributes('-topmost', True)  # Keep on top
-        self.indicator.attributes('-alpha', 0.85)  # Make window semi-transparent
-        self.indicator.configure(bg='red')
+        # Lists to hold all indicator windows and their components
+        self.indicators: list[tk.Toplevel] = []
+        self.frames: list[tk.Frame] = []
+        self.labels: list[tk.Label] = []
+        self.level_canvases: list[tk.Canvas] = []
+        self.level_bars: list[int] = []  # Canvas item IDs
 
-        # Create main frame
-        # Set borderwidth and highlightthickness to 0 to remove any hidden padding.
-        self.frame = tk.Frame(self.indicator, bg='red', borderwidth=0, highlightthickness=0)
-        self.frame.pack(fill='both', padx=self.frame_padding, pady=self.frame_padding)
+        # Create indicator window(s) based on all_displays setting
+        self._create_all_windows()
 
-        # Create label with click binding
-        font_config = ('TkDefaultFont', self.font_size) if self.font_size else None
-        self.label = tk.Label(self.frame, text=self.label_text,
-                            fg='white', bg='red', padx=self.label_padx, pady=self.label_pady,
-                            cursor="hand2", font=font_config)  # Change cursor to hand on hover
-        self.label.pack()
-
-        # Create audio level indicator (initially hidden)
-        # Set an initial width of 1px to prevent the canvas from dictating the window's width.
-        # It will expand horizontally to fill the frame due to `fill='x'`.
-        self.level_canvas = tk.Canvas(self.frame, width=1, height=self.level_height, bg='darkred',
-                                    highlightthickness=0, borderwidth=0)
-        self.level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
-        self.level_bar = self.level_canvas.create_rectangle(0, 0, 0, self.level_height,
-                                                          fill='white', width=0)
+        # Backward compatibility: reference to first window's components
+        self.indicator = self.indicators[0]
+        self.frame = self.frames[0]
+        self.label = self.labels[0]
+        self.level_canvas = self.level_canvases[0]
+        self.level_bar = self.level_bars[0]
 
         # Add pulsing state variables
         self.pulsing = False
@@ -71,12 +62,7 @@ class UIFeedback:
         self.on_retry_callback: Optional[Callable[[], None]] = None
         self.retry_available = False
 
-        # Bind click events
-        self.label.bind('<Button-1>', self._handle_click)
-        self.indicator.bind('<Button-1>', self._handle_click)
-        self.level_canvas.bind('<Button-1>', self._handle_click)
-
-        # Position window initially
+        # Position windows initially
         self._position_window()
 
         # Add warning state variables
@@ -84,7 +70,78 @@ class UIFeedback:
         self.warning_timer: Optional[str] = None
 
         # Update label text color to be more visible on warning background
-        self.label.configure(fg='black')  # Will be dynamically changed based on state
+        for label in self.labels:
+            label.configure(fg='black')  # Will be dynamically changed based on state
+
+    def _create_indicator_window(self) -> Tuple[tk.Toplevel, tk.Frame, tk.Label, tk.Canvas, int]:
+        """Creates a single indicator window with all its components."""
+        indicator = tk.Toplevel(self.root)
+        indicator.withdraw()
+
+        # Configure the indicator window
+        indicator.overrideredirect(True)  # Remove window decorations
+        indicator.attributes('-topmost', True)  # Keep on top
+        indicator.attributes('-alpha', 0.85)  # Make window semi-transparent
+        indicator.configure(bg='red')
+
+        # Create main frame
+        frame = tk.Frame(indicator, bg='red', borderwidth=0, highlightthickness=0)
+        frame.pack(fill='both', padx=self.frame_padding, pady=self.frame_padding)
+
+        # Create label with click binding
+        font_config = ('TkDefaultFont', self.font_size) if self.font_size else None
+        label = tk.Label(frame, text=self.label_text,
+                        fg='white', bg='red', padx=self.label_padx, pady=self.label_pady,
+                        cursor="hand2", font=font_config)
+        label.pack()
+
+        # Create audio level indicator
+        level_canvas = tk.Canvas(frame, width=1, height=self.level_height, bg='darkred',
+                                highlightthickness=0, borderwidth=0)
+        level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
+        level_bar = level_canvas.create_rectangle(0, 0, 0, self.level_height,
+                                                  fill='white', width=0)
+
+        # Bind click events
+        label.bind('<Button-1>', self._handle_click)
+        indicator.bind('<Button-1>', self._handle_click)
+        level_canvas.bind('<Button-1>', self._handle_click)
+
+        return indicator, frame, label, level_canvas, level_bar
+
+    def _create_all_windows(self) -> None:
+        """Creates all indicator windows based on all_displays setting."""
+        # Clear existing windows
+        for indicator in self.indicators:
+            indicator.destroy()
+        self.indicators.clear()
+        self.frames.clear()
+        self.labels.clear()
+        self.level_canvases.clear()
+        self.level_bars.clear()
+
+        if self.all_displays:
+            monitors = get_all_monitor_geometries()
+            # Create one window per monitor (at least one if enumeration fails)
+            num_windows = max(1, len(monitors))
+        else:
+            num_windows = 1
+
+        for _ in range(num_windows):
+            indicator, frame, label, level_canvas, level_bar = self._create_indicator_window()
+            self.indicators.append(indicator)
+            self.frames.append(frame)
+            self.labels.append(label)
+            self.level_canvases.append(level_canvas)
+            self.level_bars.append(level_bar)
+
+        # Update backward compatibility references
+        if self.indicators:
+            self.indicator = self.indicators[0]
+            self.frame = self.frames[0]
+            self.label = self.labels[0]
+            self.level_canvas = self.level_canvases[0]
+            self.level_bar = self.level_bars[0]
 
     def _configure_size_attributes(self) -> None:
         """Sets UI dimension attributes based on self.size."""
@@ -108,18 +165,17 @@ class UIFeedback:
             self.label_text = "🎤 Recording (click to cancel)"
 
     def _show_on_top(self) -> None:
-        """Show the indicator window and ensure it stays on top."""
-        self.indicator.deiconify()
-        self.indicator.attributes('-topmost', True)
-        self.indicator.lift()
+        """Show all indicator windows and ensure they stay on top."""
+        for indicator in self.indicators:
+            indicator.deiconify()
+            indicator.attributes('-topmost', True)
+            indicator.lift()
 
-    def _position_window(self) -> None:
-        """Positions the indicator window based on the configured corner."""
-        self.indicator.update_idletasks()
-        win_w = self.indicator.winfo_width()
-        win_h = self.indicator.winfo_height()
-
-        monitor_geometry = get_primary_monitor_geometry()
+    def _position_single_window(self, indicator: tk.Toplevel, monitor_geometry: Optional[MonitorGeometry]) -> None:
+        """Positions a single indicator window on the given monitor."""
+        indicator.update_idletasks()
+        win_w = indicator.winfo_width()
+        win_h = indicator.winfo_height()
 
         # Default coordinates if monitor info fails
         if monitor_geometry:
@@ -150,7 +206,23 @@ class UIFeedback:
         else:  # top
             pos_y = mon_y + margin
 
-        self.indicator.geometry(f'+{pos_x}+{pos_y}')
+        indicator.geometry(f'+{pos_x}+{pos_y}')
+
+    def _position_window(self) -> None:
+        """Positions all indicator windows based on the configured corner."""
+        if self.all_displays:
+            monitors = get_all_monitor_geometries()
+            # Check if monitor count changed
+            if len(monitors) != len(self.indicators):
+                self._create_all_windows()
+            # Position each window on its respective monitor
+            for i, indicator in enumerate(self.indicators):
+                monitor = monitors[i] if i < len(monitors) else None
+                self._position_single_window(indicator, monitor)
+        else:
+            # Single display mode - use primary monitor
+            monitor_geometry = get_primary_monitor_geometry()
+            self._position_single_window(self.indicators[0], monitor_geometry)
 
     # Public method to allow position change at runtime
     def set_position(self, position: str) -> None:
@@ -169,50 +241,61 @@ class UIFeedback:
             # Reconfigure dimensions based on new size
             self._configure_size_attributes()
 
-            # Update UI elements with new dimensions
+            # Update UI elements with new dimensions on all windows
             font_config = ('TkDefaultFont', self.font_size) if self.font_size else None
-            self.label.configure(padx=self.label_padx, pady=self.label_pady, font=font_config)
-            self.frame.configure(padx=self.frame_padding, pady=self.frame_padding)
-            self.level_canvas.configure(height=self.level_height)
-            self.level_canvas.pack_configure(padx=self.level_padx, pady=self.level_pady)
+            for i, (frame, label, level_canvas) in enumerate(zip(self.frames, self.labels, self.level_canvases)):
+                label.configure(padx=self.label_padx, pady=self.label_pady, font=font_config)
+                frame.configure(padx=self.frame_padding, pady=self.frame_padding)
+                level_canvas.configure(height=self.level_height)
+                level_canvas.pack_configure(padx=self.level_padx, pady=self.level_pady)
 
-            # Update label text based on current status
-            current_text = self.label.cget('text')
-            if '🎤 Recording' in current_text:
-                self.label.configure(text=self.label_text)
+                # Update label text based on current status
+                current_text = label.cget('text')
+                if '🎤 Recording' in current_text:
+                    label.configure(text=self.label_text)
 
-            # Reposition window with new size
+            # Reposition windows with new size
+            self._position_window()
+
+    def set_all_displays(self, enabled: bool) -> None:
+        """Enable or disable showing indicator on all displays."""
+        if self.all_displays != enabled:
+            self.all_displays = enabled
+            self._create_all_windows()
             self._position_window()
 
     def update_audio_level(self, level: float) -> None:
         """Update the audio level indicator (level should be between 0.0 and 1.0)"""
         if self.pulsing:  # Only update when recording
-            width = self.level_canvas.winfo_width()
-            bar_width = int(width * min(1.0, max(0.0, level)))
-            self.level_canvas.coords(self.level_bar, 0, 0, bar_width, self.level_height)
+            for level_canvas, level_bar in zip(self.level_canvases, self.level_bars):
+                width = level_canvas.winfo_width()
+                bar_width = int(width * min(1.0, max(0.0, level)))
+                level_canvas.coords(level_bar, 0, 0, bar_width, self.level_height)
 
     def _pulse(self) -> None:
         if self.pulsing:
             self.current_color = (self.current_color + 1) % 2
             color = self.pulse_colors[self.current_color]
-            self.indicator.configure(bg=color)
-            self.frame.configure(bg=color)
-            self.label.configure(bg=color)
-            self.indicator.after(500, self._pulse)  # Pulse every 500ms
+            for indicator, frame, label in zip(self.indicators, self.frames, self.labels):
+                indicator.configure(bg=color)
+                frame.configure(bg=color)
+                label.configure(bg=color)
+            self.indicators[0].after(500, self._pulse)  # Pulse every 500ms
 
     def start_listening_animation(self) -> None:
-        """Start the recording animation"""
+        """Start the recording animation on all windows"""
         # Cancel any existing warning state
         if self.warning_timer:
-            self.indicator.after_cancel(self.warning_timer)
+            self.indicators[0].after_cancel(self.warning_timer)
             self.warning_timer = None
 
         self.pulse_colors = self.RECORDING_COLORS
-        self.label.configure(
-            text=self.label_text,
-            fg='white'
-        )
-        self.level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
+        for label, level_canvas in zip(self.labels, self.level_canvases):
+            label.configure(
+                text=self.label_text,
+                fg='white'
+            )
+            level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
         self._position_window()
         self._show_on_top()
         self.pulsing = True
@@ -220,18 +303,22 @@ class UIFeedback:
         self._snap_to_content()
 
     def stop_listening_animation(self) -> None:
-        """Stop the recording animation"""
+        """Stop the recording animation on all windows"""
         self.pulsing = False
         # Only hide if no warning is active
         if not self.warning_timer:
-            self.indicator.withdraw()
+            for indicator in self.indicators:
+                indicator.withdraw()
         # Reset colors to recording state
         self.current_color = 0
-        self.indicator.configure(bg=self.RECORDING_COLORS[0])
-        self.frame.configure(bg=self.RECORDING_COLORS[0])
-        self.label.configure(bg=self.RECORDING_COLORS[0])
-        # Reset audio level
-        self.level_canvas.coords(self.level_bar, 0, 0, 0, self.level_height)
+        for indicator, frame, label, level_canvas, level_bar in zip(
+            self.indicators, self.frames, self.labels, self.level_canvases, self.level_bars
+        ):
+            indicator.configure(bg=self.RECORDING_COLORS[0])
+            frame.configure(bg=self.RECORDING_COLORS[0])
+            label.configure(bg=self.RECORDING_COLORS[0])
+            # Reset audio level
+            level_canvas.coords(level_bar, 0, 0, 0, self.level_height)
 
     def _handle_click(self, event: tk.Event) -> None:
         if self.retry_available and self.on_retry_callback:
@@ -257,76 +344,85 @@ class UIFeedback:
             print(f"UIFeedback: Error during text insertion: {str(e)}")
 
     def show_warning(self, message: str, duration_ms: int = 5000) -> None:
-        """Show a warning message in the indicator for a specified duration"""
+        """Show a warning message in all indicators for a specified duration"""
         # Cancel any existing warning timer
         if self.warning_timer:
-            self.indicator.after_cancel(self.warning_timer)
+            self.indicators[0].after_cancel(self.warning_timer)
 
-        # Update appearance for warning state
+        # Update appearance for warning state on all windows
         self._show_on_top()
-        self.indicator.configure(bg=self.warning_color)
-        self.frame.configure(bg=self.warning_color)
-        self.label.configure(
-            bg=self.warning_color,
-            fg='black',  # Dark text for warning state
-            text=message
-        )
+        for indicator, frame, label, level_canvas in zip(
+            self.indicators, self.frames, self.labels, self.level_canvases
+        ):
+            indicator.configure(bg=self.warning_color)
+            frame.configure(bg=self.warning_color)
+            label.configure(
+                bg=self.warning_color,
+                fg='black',  # Dark text for warning state
+                text=message
+            )
+            # Hide the level indicator during warning
+            level_canvas.pack_forget()
+
         self._position_window()
         self._snap_to_content()
 
-        # Hide the level indicator during warning
-        self.level_canvas.pack_forget()
-
         # Schedule auto-dismiss
-        self.warning_timer = self.indicator.after(
+        self.warning_timer = self.indicators[0].after(
             duration_ms,
             self._reset_and_hide
         )
 
     def show_error_with_retry(self, message: str, duration_ms: int = 7000) -> None:
-        """Show error message with retry option"""
+        """Show error message with retry option on all windows"""
         # Cancel any existing warning timer
         if self.warning_timer:
-            self.indicator.after_cancel(self.warning_timer)
+            self.indicators[0].after_cancel(self.warning_timer)
 
         self.retry_available = True
 
-        # Update appearance for error state
+        # Update appearance for error state on all windows
         self._show_on_top()
-        self.indicator.configure(bg=self.warning_color)
-        self.frame.configure(bg=self.warning_color)
-        self.label.configure(
-            bg=self.warning_color,
-            fg='black',
-            text=f"{message}\n🔄 Click to retry"
-        )
+        for indicator, frame, label, level_canvas in zip(
+            self.indicators, self.frames, self.labels, self.level_canvases
+        ):
+            indicator.configure(bg=self.warning_color)
+            frame.configure(bg=self.warning_color)
+            label.configure(
+                bg=self.warning_color,
+                fg='black',
+                text=f"{message}\n🔄 Click to retry"
+            )
+            # Hide the level indicator during warning
+            level_canvas.pack_forget()
+
         self._position_window()
 
-        # Hide the level indicator during warning
-        self.level_canvas.pack_forget()
-
         # Schedule auto-dismiss
-        self.warning_timer = self.indicator.after(
+        self.warning_timer = self.indicators[0].after(
             duration_ms,
             self._reset_and_hide
         )
 
     def _reset_and_hide(self) -> None:
-        """Reset UI state and hide the indicator"""
+        """Reset UI state and hide all indicators"""
         self.warning_timer = None
         self.retry_available = False
-        self.level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)  # Restore level indicator
-        self.indicator.withdraw()
-        # Reset to recording state colors
-        self.indicator.configure(bg=self.RECORDING_COLORS[0])
-        self.frame.configure(bg=self.RECORDING_COLORS[0])
-        self.label.configure(
-            bg=self.RECORDING_COLORS[0],
-            fg='white'  # Reset to white text for recording state
-        )
+        for indicator, frame, label, level_canvas in zip(
+            self.indicators, self.frames, self.labels, self.level_canvases
+        ):
+            level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)  # Restore level indicator
+            indicator.withdraw()
+            # Reset to recording state colors
+            indicator.configure(bg=self.RECORDING_COLORS[0])
+            frame.configure(bg=self.RECORDING_COLORS[0])
+            label.configure(
+                bg=self.RECORDING_COLORS[0],
+                fg='white'  # Reset to white text for recording state
+            )
 
     def update_status(self, config: StatusConfig, error_message: Optional[str] = None) -> None:
-        """Update UI appearance based on status configuration"""
+        """Update UI appearance based on status configuration on all windows"""
         # Update colors and text
         text = error_message if error_message else config.ui_text
 
@@ -334,13 +430,14 @@ class UIFeedback:
         if self.size == 'mini' and config.ui_text == "🎤 Recording (click to cancel)":
             text = "🎤 Recording"
 
-        self.indicator.configure(bg=config.ui_color)
-        self.frame.configure(bg=config.ui_color)
-        self.label.configure(
-            bg=config.ui_color,
-            fg=config.ui_fg_color,
-            text=text
-        )
+        for indicator, frame, label in zip(self.indicators, self.frames, self.labels):
+            indicator.configure(bg=config.ui_color)
+            frame.configure(bg=config.ui_color)
+            label.configure(
+                bg=config.ui_color,
+                fg=config.ui_fg_color,
+                text=text
+            )
 
         # Handle visibility and animation
         if config.pulse:
@@ -354,10 +451,11 @@ class UIFeedback:
                 self._show_on_top()
                 # Auto-hide after 5 seconds for errors
                 if self.warning_timer:
-                    self.indicator.after_cancel(self.warning_timer)
-                self.warning_timer = self.indicator.after(5000, self._reset_and_hide)
+                    self.indicators[0].after_cancel(self.warning_timer)
+                self.warning_timer = self.indicators[0].after(5000, self._reset_and_hide)
             else:
-                self.indicator.withdraw()
+                for indicator in self.indicators:
+                    indicator.withdraw()
 
     def _darken_color(self, color: str) -> str:
         """Create a darker version of the given color for pulsing effect"""
@@ -382,29 +480,33 @@ class UIFeedback:
             return '#000000'  # Fallback color
 
     def cleanup(self) -> None:
-        """Ensure proper cleanup of UI resources"""
+        """Ensure proper cleanup of UI resources for all windows"""
         if self.warning_timer:
-            self.indicator.after_cancel(self.warning_timer)
+            self.indicators[0].after_cancel(self.warning_timer)
         self.pulsing = False
-        self.indicator.withdraw()
+        for indicator in self.indicators:
+            indicator.withdraw()
         self.root.quit()
-
 
     def _snap_to_content(self) -> None:
         """
-        Continuously adjusts the window size to fit its content.
-        Forces the window to "shrink-wrap" its contents by continuously measuring the
-        required space and resizing the window to match. This prevents "mysterious margins".
+        Continuously adjusts all window sizes to fit their content.
+        Forces windows to "shrink-wrap" their contents by continuously measuring the
+        required space and resizing windows to match. This prevents "mysterious margins".
         """
         try:
-            self.indicator.update_idletasks()
-            w = self.indicator.winfo_reqwidth()
-            h = self.indicator.winfo_reqheight()
-            self.indicator.geometry(f"{w}x{h}")
+            for indicator in self.indicators:
+                indicator.update_idletasks()
+                w = indicator.winfo_reqwidth()
+                h = indicator.winfo_reqheight()
+                indicator.geometry(f"{w}x{h}")
+
+            # Reposition after resizing to ensure correct placement
+            self._position_window()
 
             # Schedule the next check
             if self.pulsing or self.warning_timer:
-                self.indicator.after(100, self._snap_to_content)
+                self.indicators[0].after(100, self._snap_to_content)
         except tk.TclError:
             # This can happen if the window is destroyed while the after() call is pending
             pass

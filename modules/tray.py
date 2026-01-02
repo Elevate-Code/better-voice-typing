@@ -283,6 +283,12 @@ class TrayIconManager:
             app.ui_feedback.set_size(new_size)
             self.update_menu()
 
+        def toggle_all_displays():
+            current = app.settings.get('ui_indicator_all_displays')
+            app.settings.set('ui_indicator_all_displays', not current)
+            app.ui_feedback.set_all_displays(not current)
+            self.update_menu()
+
         def on_exit(icon, item):
             app.logger.info("Application exiting.")
             self.stop()
@@ -340,6 +346,12 @@ class TrayIconManager:
                                 'Mini Size',
                                 lambda icon, item: change_ui_size('mini'),
                                 checked=lambda item: app.settings.get('ui_indicator_size') == 'mini'
+                            ),
+                            pystray.Menu.SEPARATOR,
+                            pystray.MenuItem(
+                                'Show on All Displays',
+                                lambda icon, item: toggle_all_displays(),
+                                checked=lambda item: app.settings.get('ui_indicator_all_displays')
                             ),
                             pystray.Menu.SEPARATOR,
                             pystray.MenuItem(
