@@ -15,6 +15,7 @@ import pyperclip
 
 from modules.clean_text import clean_transcription
 from modules.history import TranscriptionHistory
+from modules.output_providers import initialize_providers
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
 from modules.settings import Settings
 from modules.transcribe import transcribe_audio
@@ -63,6 +64,14 @@ class VoiceTypingApp:
         self.ctrl_pressed = False
         self.clean_transcription_enabled = self.settings.get('clean_transcription')
         self.history = TranscriptionHistory()
+
+        # Initialize output providers and show any plugin errors
+        plugin_errors = initialize_providers()
+        if plugin_errors:
+            # Show first error briefly, log all
+            self.ui_feedback.show_warning(plugin_errors[0], duration_ms=5000)
+            for error in plugin_errors:
+                self.logger.warning(f"Plugin error: {error}")
 
         # Add a flag for canceling processing
         self.processing_thread: Optional[threading.Thread] = None
@@ -283,7 +292,8 @@ class VoiceTypingApp:
                     self.status_manager.set_status(AppStatus.ERROR, "⚠️ Error processing audio")
             elif result:
                 self.history.add(result)
-                self.ui_feedback.insert_text(result)
+                output_mode = self.settings.get('output_mode')
+                self.ui_feedback.insert_text(result, output_mode=output_mode)
                 if self.update_icon_menu:
                     self.update_icon_menu()
                 self.status_manager.set_status(AppStatus.IDLE)

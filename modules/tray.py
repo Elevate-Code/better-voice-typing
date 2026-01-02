@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 
 from modules.audio_manager import get_input_devices, get_default_device_id, set_input_device, create_device_identifier
 from modules import transcribe
+from modules import output_providers
 
 # Windows constants for TaskbarCreated message
 WM_USER = 0x0400
@@ -189,6 +190,30 @@ def create_stt_provider_menu(app):
     return menu_items
 
 
+def create_output_mode_menu(app):
+    """Creates menu for output mode selection"""
+    current_mode = app.settings.get('output_mode')
+    available_providers = output_providers.get_available_providers()
+
+    def make_mode_handler(mode_name: str):
+        def handler(icon, item):
+            app.settings.set('output_mode', mode_name)
+            app.update_icon_menu()
+        return handler
+
+    menu_items = []
+    for provider in available_providers:
+        menu_items.append(
+            pystray.MenuItem(
+                provider['display_name'],
+                make_mode_handler(provider['name']),
+                checked=lambda item, p=provider: p['name'] == app.settings.get('output_mode')
+            )
+        )
+
+    return menu_items
+
+
 class TrayIconManager:
     """
     Manages the system tray icon with automatic recovery from failures.
@@ -241,6 +266,7 @@ class TrayIconManager:
         copy_menu = create_copy_menu(app)
         microphone_menu = create_microphone_menu(app)
         stt_menu = create_stt_provider_menu(app)
+        output_menu = create_output_mode_menu(app)
 
         def copy_latest_transcription(icon, item) -> None:
             recent_texts = app.history.get_recent()
@@ -351,6 +377,12 @@ class TrayIconManager:
                     pystray.MenuItem(
                         'Speech-to-Text',
                         pystray.Menu(*stt_menu)
+                    ),
+                    pystray.MenuItem(
+                        'Output Mode',
+                        pystray.Menu(*output_menu) if output_menu else pystray.Menu(
+                            pystray.MenuItem('No providers available', None, enabled=False)
+                        )
                     )
                 )
             ),

@@ -124,6 +124,56 @@ If your server requires authentication, set the `CUSTOM_STT_API_KEY` environment
 CUSTOM_STT_API_KEY="your-api-key-here"
 ```
 
+## Plugins (Output Providers)
+
+You can customize how transcribed text is inserted by creating output provider plugins.
+
+### Plugin Location
+
+Plugins are Python files placed in:
+```
+C:\Users\{YourUsername}\Documents\VoiceTyping\plugins\
+```
+
+This directory is created automatically on first run.
+
+### Creating a Plugin
+
+Create a `.py` file that defines a class inheriting from `OutputProvider`:
+
+```python
+# Example: chunked_terminal.py
+import time
+import pyautogui
+import pyperclip
+from modules.output_providers import OutputProvider
+
+class ChunkedTerminalOutputProvider(OutputProvider):
+    """Pastes text in chunks for terminals that truncate large pastes"""
+
+    name = "chunked_terminal"
+    display_name = "Chunked Terminal"
+
+    def insert_text(self, text, pyautogui_lock, root_after):
+        chunk_size = 500
+        with pyautogui_lock:
+            original = pyperclip.paste()
+            for i in range(0, len(text), chunk_size):
+                pyperclip.copy(text[i:i + chunk_size])
+                pyautogui.hotkey('ctrl', 'v')
+                if i + chunk_size < len(text):
+                    time.sleep(1.5)
+            root_after(100, lambda: pyperclip.copy(original))
+```
+
+### Using Your Plugin
+
+1. Place your plugin file in the plugins directory
+2. Restart the application
+3. Right-click tray icon → Settings → Output Mode → Select your provider
+
+Plugin errors are logged to `Documents\VoiceTyping\logs` and shown briefly on startup.
+
 ## Setup/Installation - For Users
 
 ### Quick Start (Windows)

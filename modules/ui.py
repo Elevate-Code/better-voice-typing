@@ -8,6 +8,7 @@ import pyperclip
 
 from modules.status_manager import StatusConfig
 from modules.screen_utils import get_primary_monitor_geometry
+from modules.output_providers import get_output_provider
 
 class UIFeedback:
     pyautogui_lock = threading.Lock()
@@ -247,19 +248,11 @@ class UIFeedback:
         """Set the function to be called when retry is clicked"""
         self.on_retry_callback = callback
 
-    def insert_text(self, text: str) -> None:
-        """Insert text at the current cursor position using clipboard while preserving original clipboard content"""
+    def insert_text(self, text: str, output_mode: str = 'standard') -> None:
+        """Insert text at the current cursor position using the configured output provider"""
         try:
-            with self.pyautogui_lock:
-                # Save original clipboard content
-                original_clipboard = pyperclip.paste()
-
-                # Copy new text and paste it
-                pyperclip.copy(text)
-                pyautogui.hotkey('ctrl', 'v')
-
-                # Restore original clipboard content after a small delay (non-blocking)
-                self.root.after(100, lambda: pyperclip.copy(original_clipboard))
+            provider = get_output_provider(output_mode)
+            provider.insert_text(text, self.pyautogui_lock, self.root.after)
         except Exception as e:
             print(f"UIFeedback: Error during text insertion: {str(e)}")
 

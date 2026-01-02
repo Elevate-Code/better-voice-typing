@@ -27,7 +27,10 @@ class Settings:
             'ui_indicator_size': 'normal',  # 'normal', 'mini'
 
             # Logging
-            'log_retention_days': 60
+            'log_retention_days': 60,
+
+            # Output
+            'output_mode': 'standard',  # Output provider for text insertion
         }
         self.current_settings: Dict[str, Any] = self.load_settings()
         self._run_migrations()
