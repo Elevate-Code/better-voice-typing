@@ -6,6 +6,7 @@
       {
         "category": "General",
         "date": "2026-07-11",
+        "version": "0.7.0",
         "changes": [
           "Fixed canceling an in-flight transcription leaving the indicator stuck on a pulsing status; canceling now resets the UI immediately.",
           "Fixed a race where canceling a recording by clicking the indicator and immediately pressing Caps Lock could start a new recording while the previous one was still shutting down.",
