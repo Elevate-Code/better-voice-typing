@@ -6,6 +6,16 @@
       {
         "category": "General",
         "date": "2026-07-11",
+        "version": "0.7.1",
+        "changes": [
+          "Security: updated litellm (2 critical, 4 high CVEs), Pillow (3 high, 2 medium), requests, and python-dotenv to patched versions, resolving all 13 open Dependabot alerts.",
+          "Updated the OpenAI SDK to 2.x as required by the new litellm version; transcription behavior is unchanged.",
+          "Saved llm_model values without a provider prefix (e.g. 'claude-3-5-haiku-latest') are migrated to prefixed form ('anthropic/...') since newer litellm versions no longer infer the provider."
+        ]
+      },
+      {
+        "category": "General",
+        "date": "2026-07-11",
         "version": "0.7.0",
         "changes": [
           "Fixed canceling an in-flight transcription leaving the indicator stuck on a pulsing status; canceling now resets the UI immediately.",

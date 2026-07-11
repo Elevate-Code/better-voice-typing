@@ -1,21 +1,21 @@
 # ⚠️ for adding new packages, add a locked version here and then run `uv pip install -r requirements.txt`
 
 # Core functionality
-python-dotenv==1.0.1  # Environment variables
+python-dotenv==1.2.2  # Environment variables
 pynput==1.7.6  # Keyboard shortcuts
 sounddevice==0.5.1  # Audio recording
 soundfile==0.12.1  # Audio file handling
 
 # AI
-litellm==1.63.11 # model routing
+litellm==1.84.0 # model routing
 tenacity==8.5.0 # Retrying library
-openai==1.68.0
+openai==2.20.0  # litellm 1.84 requires openai>=2.20,<3
 anthropic==0.49.0
-requests==2.32.4  # For update check
+requests==2.33.0  # For update check
 
 # UI and system interaction
 pyautogui==0.9.54  # Cursor/text manipulation
 pystray==0.19.5  # System tray icon
-Pillow==10.3.0  # Required by pystray for icons
+Pillow==12.2.0  # Required by pystray for icons
 numpy==2.0.2
 pyperclip==1.9.0

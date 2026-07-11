@@ -88,7 +88,8 @@ class Settings:
         migrations_run = [
             self._migrate_device_settings(),
             self._migrate_silence_timeout(),
-            self._migrate_obsolete_settings()
+            self._migrate_obsolete_settings(),
+            self._migrate_llm_model_prefix()
         ]
 
         if any(migrations_run):
@@ -114,6 +115,19 @@ class Settings:
             changes_made = True
 
         return changes_made
+
+    def _migrate_llm_model_prefix(self) -> bool:
+        """litellm >= 1.84 no longer infers the provider from bare model names
+        (e.g. 'claude-3-5-haiku-latest'); prepend the provider prefix."""
+        model = self.current_settings.get('llm_model')
+        if isinstance(model, str) and model and '/' not in model:
+            if model.startswith('claude'):
+                self.current_settings['llm_model'] = f'anthropic/{model}'
+                return True
+            if model.startswith(('gpt', 'o1', 'o3', 'o4')):
+                self.current_settings['llm_model'] = f'openai/{model}'
+                return True
+        return False
 
     def _migrate_silence_timeout(self) -> bool:
         """Renames 'silence_timeout' to 'silent_start_timeout'. Returns True if changes were made."""
