@@ -1,19 +1,50 @@
 import json
+import logging
 import os
-from typing import Any, Dict
+import shutil
+import threading
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger('voice_typing')
+
+# Settings live alongside logs/history so user data survives git operations on the repo
+SETTINGS_DIR = Path.home() / "Documents" / "VoiceTyping"
+_LEGACY_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
 
 class Settings:
+    """Application settings. Singleton: every Settings() call returns the same
+    instance so all modules share one in-memory state and never clobber each
+    other's saves."""
+
+    _instance: Optional["Settings"] = None
+    _instance_lock = threading.Lock()
+
+    def __new__(cls) -> "Settings":
+        with cls._instance_lock:
+            if cls._instance is None:
+                instance = super().__new__(cls)
+                instance._initialized = False
+                cls._instance = instance
+            return cls._instance
+
     def __init__(self) -> None:
-        self.settings_file: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
+        if self._initialized:
+            return
+        self._initialized = True
+        self._save_lock = threading.Lock()
+        self.settings_file: str = str(SETTINGS_DIR / 'settings.json')
+        self._migrate_settings_location()
         self.default_settings: Dict[str, Any] = {
-            'smart_capture': False,
             'silent_start_timeout': 4.0,
             'silence_threshold': 0.01,  # RMS threshold for silence detection (0.01 = -40dB)
+            'max_recording_duration': 900.0,  # Auto-stop (and still transcribe) after this many seconds; null to disable
 
-            'stt_provider': 'openai',  # 'openai', 'google', etc.
+            'stt_provider': 'openai',  # 'openai', 'custom'
             'stt_language': 'en',
             'openai_stt_model': 'gpt-4o-transcribe',  # 'whisper-1', 'gpt-4o-transcribe'
-            'google_stt_language': 'en-US',
+            'custom_stt_base_url': 'http://localhost:8000',
+            'custom_stt_model': 'parakeet-tdt-0.6b-v2',
 
             'clean_transcription': False,
             'cleaning_timeout': 10.0,  # Timeout for LLM cleaning in seconds
@@ -29,12 +60,28 @@ class Settings:
 
             # Logging
             'log_retention_days': 60,
+            'log_transcript_text': True,  # Include full transcript text in log files
 
             # Output
             'output_mode': 'standard',  # Output provider for text insertion
+            'clipboard_restore_delay_ms': 300,  # Delay before restoring original clipboard after paste
         }
         self.current_settings: Dict[str, Any] = self.load_settings()
         self._run_migrations()
+
+    def _migrate_settings_location(self) -> None:
+        """One-time move of settings.json from modules/ into Documents\\VoiceTyping."""
+        new_path = Path(self.settings_file)
+        old_path = Path(_LEGACY_SETTINGS_FILE)
+        if new_path.exists() or not old_path.exists():
+            return
+        try:
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(old_path), str(new_path))
+            logger.info(f"Migrated settings file to {new_path}")
+        except Exception as e:
+            logger.error(f"Failed to migrate settings file, falling back to legacy location: {e}")
+            self.settings_file = str(old_path)
 
     def _run_migrations(self) -> None:
         """Runs all necessary setting migrations and saves if changes were made."""
@@ -49,14 +96,23 @@ class Settings:
 
     def _migrate_obsolete_settings(self) -> bool:
         """Removes obsolete settings keys. Returns True if changes were made."""
-        obsolete_keys = ['continuous_capture']
+        obsolete_keys = [
+            'continuous_capture',
+            'smart_capture',        # never-implemented feature stub, removed 2026-07
+            'google_stt_language',  # Google STT provider removed 2026-07
+        ]
         changes_made = False
         
         for key in obsolete_keys:
             if key in self.current_settings:
                 self.current_settings.pop(key)
                 changes_made = True
-                
+
+        # Google STT provider was removed; fall back to OpenAI
+        if self.current_settings.get('stt_provider') == 'google':
+            self.current_settings['stt_provider'] = 'openai'
+            changes_made = True
+
         return changes_made
 
     def _migrate_silence_timeout(self) -> bool:
@@ -116,23 +172,26 @@ class Settings:
                 self.save_defaults()
                 return self.default_settings.copy()
         except Exception as e:
-            print(f"Error loading settings: {str(e)}")
+            logger.error(f"Error loading settings: {e}")
             return self.default_settings.copy()
 
     def save_defaults(self) -> None:
         """Create settings file with default values if it doesn't exist"""
         try:
+            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
             with open(self.settings_file, 'w') as f:
                 json.dump(self.default_settings, f, indent=4)
         except Exception as e:
-            print(f"Error creating default settings file: {str(e)}")
+            logger.error(f"Error creating default settings file: {e}")
 
     def save_settings(self) -> None:
         try:
-            with open(self.settings_file, 'w') as f:
-                json.dump(self.current_settings, f, indent=4)
+            with self._save_lock:
+                os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
+                with open(self.settings_file, 'w') as f:
+                    json.dump(self.current_settings, f, indent=4)
         except Exception as e:
-            print(f"Error saving settings: {str(e)}")
+            logger.error(f"Error saving settings: {e}")
 
     def get(self, key: str) -> Any:
         return self.current_settings.get(key, self.default_settings.get(key))

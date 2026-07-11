@@ -26,6 +26,8 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
 - **Toggle Recording**: Caps Lock (Ctrl+Caps Lock to toggle Caps Lock on/off)
 - **Cancel Recording/Processing**: Click the recording indicator to cancel recording or transcription
 - **Copy Last Transcription**: If your cursor was misplaced, left-click tray icon to copy last transcription
+- The recording indicator shows elapsed recording time, and recordings auto-stop (and still transcribe) at a configurable maximum duration
+- Only one instance of the app can run at a time; launching it again shows a notice instead of a second conflicting instance
 
 ### Tray Options/Settings
 - Retry Last Transcription: Attempts to re-process the last audio recording, useful if the first attempt failed or was inaccurate.
@@ -35,32 +37,40 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
   - Clean Transcription: Enable/disable further refinement of the transcription using a configurable LLM.
   - Silent-Start Timeout: Cancels the recording if no sound is detected within the first few seconds, preventing accidental recordings.
   - Recording Indicator: Customize size, position, and multi-monitor display of the recording indicator.
-  - Speech-to-Text: Select your STT provider (OpenAI, Google Cloud, Custom/Local) and model (Whisper, GPT-4o, GPT-4o Mini, or custom).
+  - Speech-to-Text: Select your STT provider (OpenAI, Custom/Local) and model (Whisper, GPT-4o, GPT-4o Mini, or custom).
+  - Output Mode: Choose how text is inserted (see Plugins below).
+  - Open Settings File / Open Logs Folder: Quick access to configuration and logs.
 - Restart: Quickly restart the application, like when it's not responding to the keyboard shortcut.
 
 ### Tray History
 - Keeps track of recent transcriptions
 - Useful if your cursor was in the wrong place at the time of insertion
 - Quick access to copy previous transcriptions from system tray
+- The last 50 transcriptions are also saved (with timestamps) to `Documents\VoiceTyping\history.json`, so nothing is lost across restarts or crashes
 
 ### Fine-Tuning (Optional)
 
-While most settings can be controlled from the tray menu, you can fine-tune the application's behavior by editing the `settings.json` file.
+While most settings can be controlled from the tray menu, you can fine-tune the application's behavior by editing the settings file at `C:\Users\{YourUsername}\Documents\VoiceTyping\settings.json` (tray icon → Settings → Open Settings File). Older installs kept this file at `modules/settings.json`; it is migrated to the new location automatically on first run.
 
 | Setting | Description | Default | Example Values |
 | --- | --- | --- | --- |
 | `silent_start_timeout` | Duration in seconds to wait for sound at the beginning of a recording before automatically canceling. Set to `null` to disable. | `4.0` | `2.0` to `5.0` |
 | `silence_threshold` | The audio level (RMS) below which sound is considered silence. Lower values are more sensitive. | `0.01` | `0.005` (very quiet) to `0.02` (noisier) |
+| `max_recording_duration` | Maximum recording length in seconds; when reached, recording stops automatically and the captured audio is still transcribed. Set to `null` to disable. | `900.0` | `300.0`, `1200.0`, `null` |
 | `log_retention_days` | Number of days to keep log files. | `60` | `14`, `90`, `null` (indefinitely) |
-| `stt_provider` | The speech-to-text service to use. | `"openai"` | `"openai"`, `"google"`, `"custom"` |
+| `log_transcript_text` | Whether log files include the transcript text itself. Set to `false` to keep dictated content out of logs. | `true` | `true`, `false` |
+| `stt_provider` | The speech-to-text service to use. | `"openai"` | `"openai"`, `"custom"` |
 | `custom_stt_base_url` | Base URL for custom/local STT server. | `"http://localhost:8000"` | Any local or remote URL |
 | `custom_stt_model` | Model name for custom STT server. | `"parakeet-tdt-0.6b-v2"` | Model supported by your server |
 | `openai_stt_model` | The specific model to use for OpenAI's service. `gpt-4o-transcribe` is recommended for highest accuracy. | `"gpt-4o-transcribe"` | `"gpt-4o-transcribe"`, `"gpt-4o-mini-transcribe"` |
+| `clipboard_restore_delay_ms` | How long after pasting to wait before restoring your previous clipboard contents. Increase if slow apps paste your old clipboard instead of the transcript. | `300` | `100` to `1000` |
 
 ## Technical Details
 - Minimal UI built with Python tkinter
 - Multi-provider Speech-to-Text support with OpenAI GPT-4o models, Whisper, and custom local/remote servers
-- Extensible architecture for adding new STT providers (Google Cloud, Azure, local models, etc.)
+- Extensible architecture for adding new STT providers (Azure, local models, etc.)
+- Audio is uploaded as FLAC (lossless, roughly half the size of WAV) to reduce latency and stay under API upload limits
+- User data (settings, transcription history, logs) lives in `Documents\VoiceTyping`, so app updates never touch it
 
 ## Known Issues/Limitations
 - For now, only supporting Windows OS and Python 3.10 - 3.12
@@ -68,7 +78,7 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 - When using the `gpt-4o-transcribe` model to transcribe spoken instructions, sometimes it responds to them or carries them out.
 - Untested update mechanism ([let me know if it doesn't work](https://github.com/jason-m-hicks/better-voice-typing/issues))
 - Recordings may not produce transcriptions if your microphone's audio level is too low
-- Maximum recording duration of ~10 minutes per transcription due to OpenAI Whisper API's 25MB file size limit
+- OpenAI's API has a 25MB upload limit (roughly 20 minutes of audio with FLAC compression); recordings auto-stop at `max_recording_duration` (15 minutes by default) and are still transcribed
 
 ## Troubleshooting
 
@@ -90,7 +100,7 @@ The Voice Typing Assistant supports connecting to custom Speech-to-Text servers,
 
 1. **Via Settings Menu**: Right-click the tray icon → Settings → Speech-to-Text → Provider → Select "Custom STT"
 
-2. **Via settings.json**: Edit the `modules/settings.json` file:
+2. **Via settings.json**: Edit `Documents\VoiceTyping\settings.json` (tray icon → Settings → Open Settings File):
 ```json
 {
   "stt_provider": "custom",
@@ -254,10 +264,10 @@ Want to request a feature or report a bug? [Create an issue](https://github.com/
 - [x] Review and validate setup and installation process
 - [x] Add support for OpenAI's [new audio models](https://platform.openai.com/docs/guides/audio)
 - [x] Update and improve README.md
-- [ ] Some warning or auto-stop if recording duration is going to be too long (due to 25MB API limits)
-- [ ] Add support for more speech-to-text providers (Google Cloud implementation in progress)
-- [ ] add support for using a local whisper model via direct integration or local API server
-- [ ] Do some performance profiling and consider adding some lightweight audio compression
+- [x] Some warning or auto-stop if recording duration is going to be too long (due to 25MB API limits) — auto-stops at `max_recording_duration` and still transcribes
+- [x] Support local whisper (or other) models via the Custom STT provider and a local API server
+- [x] Performance profiling and lightweight audio compression — uploads are FLAC-encoded, deferred heavy imports at startup
+- [ ] Add support for more speech-to-text providers (Azure, Deepgram, etc.)
 - [ ] Customizable activation shortcuts for recording control
 - [ ] Since text cleaning isn't needed with gpt-4o-transcribe, pivot it to be "post-processing" and allow user to customize the prompt
 - [ ] Add user-configurable translation mode (eg. "English to {language}")

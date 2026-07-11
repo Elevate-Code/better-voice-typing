@@ -1,6 +1,7 @@
 import logging
-import litellm
 from typing import Any, cast
+
+from modules.settings import Settings
 
 # Get logger
 logger = logging.getLogger('voice_typing')
@@ -20,7 +21,13 @@ def clean_transcription(text: str, model: str, timeout: float = 45.0) -> str:
         model: The LLM model to use for cleaning
         timeout: Maximum time to wait for cleaning (in seconds)
     """
-    logger.info("ORIGINAL: %s", text)
+    # Deferred import: litellm is one of the heaviest imports in the app and
+    # cleaning is optional, so don't pay for it at startup
+    import litellm
+
+    log_text = Settings().get('log_transcript_text')
+    if log_text:
+        logger.info("ORIGINAL: %s", text)
 
     prompt = """
 Improve transcription clarity by making minimal edits to fix:
@@ -82,5 +89,6 @@ IMPORTANT: Respond only with the corrected transcription text, nothing else. So 
         logger.warning("Unexpected LLM response shape – falling back to raw text")
         cleaned_text = text
 
-    logger.info("IMPROVED: %s", cleaned_text)
+    if log_text:
+        logger.info("IMPROVED: %s", cleaned_text)
     return cleaned_text

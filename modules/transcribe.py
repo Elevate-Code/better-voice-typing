@@ -5,29 +5,34 @@ from typing import Union, Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Import all provider classes
-from services.openai_stt import OpenAITranscriber
-from services.google_stt import GoogleTranscriber
-from services.custom_stt import CustomTranscriber
+# Provider modules are imported lazily inside _get_transcriber to keep app
+# startup fast (the OpenAI SDK in particular is a heavy import).
 from modules.settings import Settings
 
 # OpenAI Speech to text docs: https://platform.openai.com/docs/guides/speech-to-text
 # ⚠️ IMPORTANT: OpenAI Audio API file uploads are currently limited to 25 MB
 
-load_dotenv()
+# Explicit path so the .env is found regardless of the process working directory
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 logger = logging.getLogger('voice_typing')
 
 # Initialize settings
 settings = Settings()
 
+# Transcriber instances cached by their full configuration so repeat
+# transcriptions reuse HTTP clients/connections. A settings change produces a
+# different key, which transparently creates a fresh instance.
+_transcriber_cache: dict = {}
+
 
 def _get_transcriber(provider_name: str):
     """
-    Factory function to get a transcriber instance based on provider name
+    Factory function to get a transcriber instance based on provider name.
+    Instances are cached per configuration.
 
     Args:
-        provider_name: Name of the provider ('openai', 'google', etc.)
+        provider_name: Name of the provider ('openai', 'custom')
 
     Returns:
         Transcriber instance for the specified provider
@@ -38,15 +43,20 @@ def _get_transcriber(provider_name: str):
     if provider_name == "openai":
         model = settings.get('openai_stt_model') or 'gpt-4o-mini-transcribe'
         language = settings.get('stt_language') or 'en'
-        return OpenAITranscriber(model=model, language=language)
-    elif provider_name == "google":
-        language = settings.get('google_stt_language') or 'en-US'
-        return GoogleTranscriber(language=language)
+        key = (provider_name, model, language)
+        if key not in _transcriber_cache:
+            from services.openai_stt import OpenAITranscriber
+            _transcriber_cache[key] = OpenAITranscriber(model=model, language=language)
+        return _transcriber_cache[key]
     elif provider_name == "custom":
         base_url = settings.get('custom_stt_base_url') or 'http://localhost:8000'
         model = settings.get('custom_stt_model') or 'parakeet-tdt-0.6b-v2'
         language = settings.get('stt_language') or 'en'
-        return CustomTranscriber(base_url=base_url, model=model, language=language)
+        key = (provider_name, base_url, model, language)
+        if key not in _transcriber_cache:
+            from services.custom_stt import CustomTranscriber
+            _transcriber_cache[key] = CustomTranscriber(base_url=base_url, model=model, language=language)
+        return _transcriber_cache[key]
     # Add other providers here as needed
     else:
         raise ValueError(f"Unknown STT provider: {provider_name}")
@@ -103,7 +113,7 @@ def set_stt_provider(provider: str) -> None:
     Change the active STT provider
 
     Args:
-        provider: Provider name ('openai', 'google', etc.)
+        provider: Provider name ('openai', 'custom')
     """
     # Validate provider
     try:
@@ -132,14 +142,6 @@ def get_available_providers() -> list:
             'models': ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe']
         })
 
-    # Check Google
-    if os.environ.get("GOOGLE_CLOUD_API_KEY"):
-        providers.append({
-            'name': 'google',
-            'display_name': 'Google Cloud',
-            'models': []  # Google doesn't have selectable models in same way
-        })
-    
     # Custom STT provider is always available (for local or remote models)
     providers.append({
         'name': 'custom',
@@ -149,9 +151,3 @@ def get_available_providers() -> list:
     })
 
     return providers
-
-
-# Maintain backward compatibility with old function signature
-def transcribe_audio_legacy(filename: str, language: str = "en") -> str:
-    """Legacy function for backward compatibility"""
-    return transcribe_audio(filename, language)

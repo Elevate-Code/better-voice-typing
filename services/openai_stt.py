@@ -17,43 +17,40 @@ PADDING_DURATION_S = 1.5
 NOISE_AMPLITUDE = 0.08
 
 
-def _pad_audio_with_noise(
+def _make_brown_noise(samples: int, amplitude: float) -> np.ndarray:
+    """Quiet brown noise (integrated white noise) — sounds more organic than white noise."""
+    white_noise = np.random.randn(samples).astype('float32')
+    brown_noise_unscaled = np.cumsum(white_noise)
+    max_abs_val = np.max(np.abs(brown_noise_unscaled))
+    if max_abs_val > 0:
+        return (brown_noise_unscaled / max_abs_val) * amplitude
+    return np.zeros_like(brown_noise_unscaled)
+
+
+def _prepare_upload(
     audio_data: Union[bytes, str, Path],
-    duration_s: float,
-    amplitude: float
+    pad_duration_s: float = 0.0,
+    noise_amplitude: float = NOISE_AMPLITUDE
 ) -> io.BytesIO:
     """
-    Pads audio data with quiet brown noise at the end for a more organic sound.
+    Loads audio (bytes or file path), optionally pads the end with quiet brown
+    noise, and encodes it as FLAC for upload.
 
-    Args:
-        audio_data: Audio data as bytes, file path string, or Path object.
-        duration_s: Duration of noise to add in seconds.
-        amplitude: The peak amplitude of the noise.
-
-    Returns:
-        An in-memory BytesIO object containing the padded audio in WAV format.
+    FLAC is lossless and roughly halves the upload size versus WAV, which cuts
+    request latency and doubles the recording length that fits under OpenAI's
+    25 MB upload cap.
     """
     input_stream = io.BytesIO(audio_data) if isinstance(audio_data, bytes) else audio_data
     data, samplerate = sf.read(input_stream, dtype='float32')
 
-    padding_samples = int(duration_s * samplerate)
-
-    # Generate white noise and integrate it to create brown noise (more "natural" sounding)
-    white_noise = np.random.randn(padding_samples).astype('float32')
-    brown_noise_unscaled = np.cumsum(white_noise)
-
-    # Normalize to the target amplitude to prevent clipping
-    max_abs_val = np.max(np.abs(brown_noise_unscaled))
-    if max_abs_val > 0:
-        noise = (brown_noise_unscaled / max_abs_val) * amplitude
-    else:
-        noise = np.zeros_like(brown_noise_unscaled)
-
-    padded_data = np.concatenate([data, noise])
+    if pad_duration_s > 0:
+        padding_samples = int(pad_duration_s * samplerate)
+        data = np.concatenate([data, _make_brown_noise(padding_samples, noise_amplitude)])
 
     buffer = io.BytesIO()
-    sf.write(buffer, padded_data, samplerate, format='WAV', subtype='PCM_16')
+    sf.write(buffer, data, samplerate, format='FLAC', subtype='PCM_16')
     buffer.seek(0)
+    buffer.name = "audio.flac"
     return buffer
 
 
@@ -94,57 +91,26 @@ class OpenAITranscriber:
             Exception: If transcription fails
         """
         try:
-            file_to_send = None
-            opened_file = None
+            if isinstance(audio_data, (str, Path)) and not Path(audio_data).exists():
+                raise FileNotFoundError(f"Audio file not found: {audio_data}")
 
-            try:
-                # Conditionally pad audio for gpt-4o models as a workaround
-                if "gpt-4o" in self.model:
-                    logger.debug(f"Padding audio with {PADDING_DURATION_S}s of quiet noise for {self.model}")
-                    padded_buffer = _pad_audio_with_noise(
-                        audio_data, PADDING_DURATION_S, NOISE_AMPLITUDE
-                    )
+            # Pad gpt-4o models as a truncation workaround; whisper needs no padding
+            pad_duration = PADDING_DURATION_S if "gpt-4o" in self.model else 0.0
+            if pad_duration:
+                logger.debug(f"Padding audio with {pad_duration}s of quiet noise for {self.model}")
 
-                    filename = "audio.wav"
-                    if isinstance(audio_data, (str, Path)):
-                        filename = Path(audio_data).name
+            file_to_send = _prepare_upload(audio_data, pad_duration)
 
-                    padded_buffer.name = filename
-                    file_to_send = padded_buffer
-
-                # Handle original, unpadded audio data
-                elif isinstance(audio_data, (str, Path)):
-                    file_path = Path(audio_data)
-                    if not file_path.exists():
-                        raise FileNotFoundError(f"Audio file not found: {file_path}")
-                    opened_file = open(file_path, 'rb')
-                    file_to_send = opened_file
-                else:
-                    file_to_send = io.BytesIO(audio_data)
-                    file_to_send.name = "audio.wav"
-
-                # Perform transcription
-                response = self.client.audio.transcriptions.create(
-                    model=self.model,
-                    file=file_to_send,
-                    language=self.language
-                )
-                return response.text
-
-            finally:
-                if opened_file:
-                    opened_file.close()
-                # BytesIO buffers are managed by garbage collector, no close needed for file_to_send
+            response = self.client.audio.transcriptions.create(
+                model=self.model,
+                file=file_to_send,
+                language=self.language
+            )
+            return response.text
 
         except Exception as e:
             logger.error(f"OpenAI transcription failed: {e}", exc_info=True)
             raise
-
-    def update_model(self, model: str) -> None:
-        """Update the model used for transcription"""
-        # dead code? probably added with the intention of reusing transcriber instances
-        # but the current implementation doesn't work that way?
-        self.model = model
 
     def update_language(self, language: str) -> None:
         """Update the language used for transcription"""

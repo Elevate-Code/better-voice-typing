@@ -8,11 +8,15 @@ if TYPE_CHECKING:
     # This is a workaround to avoid circular imports
     from modules.settings import Settings
 
+def get_log_dir() -> Path:
+    """Logs directory in the user's documents folder.
+    Ex. "C:\\Users\\{name}\\Documents\\VoiceTyping\\logs" """
+    return Path.home() / "Documents" / "VoiceTyping" / "logs"
+
+
 def setup_logging(settings: "Settings") -> logging.Logger:
     """Configure application logging"""
-    # Create logs directory in user's documents folder
-    # Ex. "C:\Users\{name}\Documents\VoiceTyping\logs\voice_typing_20241120.log"
-    log_dir = Path.home() / "Documents" / "VoiceTyping" / "logs"
+    log_dir = get_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Clean up old log files

@@ -13,13 +13,14 @@ from PIL import Image, ImageDraw
 from modules.audio_manager import get_input_devices, get_default_device_id, set_input_device, create_device_identifier
 from modules import transcribe
 from modules import output_providers
+from modules.logger import get_log_dir
 
 # Windows constants for TaskbarCreated message
 WM_USER = 0x0400
 ICON_WATCHDOG_INTERVAL = 30  # Check icon health every 30 seconds
 ICON_RESTART_DELAY = 2  # Wait 2 seconds before restarting icon after failure
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('voice_typing')
 
 def create_tray_icon(icon_path: str) -> Image.Image:
     """Create tray icon from file path"""
@@ -125,7 +126,7 @@ def create_stt_provider_menu(app):
                 transcribe.set_stt_provider(provider_name)
                 app.update_icon_menu()
             except Exception as e:
-                print(f"Error changing STT provider: {e}")
+                logger.error(f"Error changing STT provider: {e}")
         return handler
 
     def make_model_handler(model: str):
@@ -330,11 +331,6 @@ class TrayIconManager:
                         checked=lambda item: app.settings.get('silent_start_timeout') is not None
                     ),
                     pystray.MenuItem(
-                        'Smart Capture',
-                        lambda icon, item: None,
-                        enabled=False
-                    ),
-                    pystray.MenuItem(
                         'Recording Indicator',
                         pystray.Menu(
                             pystray.MenuItem(
@@ -395,6 +391,15 @@ class TrayIconManager:
                         pystray.Menu(*output_menu) if output_menu else pystray.Menu(
                             pystray.MenuItem('No providers available', None, enabled=False)
                         )
+                    ),
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem(
+                        'Open Settings File',
+                        lambda icon, item: os.startfile(app.settings.settings_file)
+                    ),
+                    pystray.MenuItem(
+                        'Open Logs Folder',
+                        lambda icon, item: os.startfile(str(get_log_dir()))
                     )
                 )
             ),

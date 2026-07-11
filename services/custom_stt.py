@@ -30,10 +30,17 @@ class CustomTranscriber:
         self.base_url = base_url.rstrip('/')
         self.model = model
         self.language = language
-        
+
         # Get API key if configured (optional for local models)
         self.api_key = os.environ.get("CUSTOM_STT_API_KEY")
-        
+
+        # Remember which endpoint pattern worked so subsequent requests skip the probing
+        self._working_endpoint: Optional[str] = None
+
+        # (connect, read) timeouts: fail fast on unreachable hosts instead of
+        # hanging for the full read timeout per endpoint attempt
+        self._timeout = (5, 60)
+
         logger.info(f"Initialized custom transcriber with URL: {self.base_url}, model: {model}")
 
     def transcribe(self, audio_data: Union[bytes, str, Path]) -> str:
@@ -67,34 +74,38 @@ class CustomTranscriber:
             if self.api_key:
                 headers['Authorization'] = f"Bearer {self.api_key}"
             
-            # Try common endpoint patterns
+            # Try common endpoint patterns; a previously successful endpoint is tried first
             endpoints = [
                 f"{self.base_url}/transcribe",                # Simple format
                 f"{self.base_url}/v1/audio/transcriptions",  # OpenAI API v1 format
                 f"{self.base_url}/api/transcribe",            # API prefix format
             ]
-            
+            if self._working_endpoint in endpoints:
+                endpoints.remove(self._working_endpoint)
+                endpoints.insert(0, self._working_endpoint)
+
             last_error = None
             for endpoint in endpoints:
                 # Prepare the request with 'file' field (common standard)
                 files = {
                     'file': (filename, io.BytesIO(audio_bytes), 'audio/wav')
                 }
-                
+
                 logger.debug(f"Trying endpoint: {endpoint}")
-                
+
                 # First try: just the file (minimal request)
                 try:
                     response = requests.post(
                         endpoint,
                         files=files,
                         headers=headers,
-                        timeout=60
+                        timeout=self._timeout
                     )
-                    
+
                     if response.status_code == 200:
+                        self._working_endpoint = endpoint
                         return self._parse_response(response.json())
-                        
+
                     elif response.status_code == 422 or response.status_code == 400:
                         # Try with model parameter
                         logger.debug(f"Got {response.status_code}, trying with model parameter")
@@ -104,27 +115,28 @@ class CustomTranscriber:
                         data = {
                             'model': self.model
                         }
-                        
+
                         response = requests.post(
                             endpoint,
                             files=files,
                             data=data,
                             headers=headers,
-                            timeout=60
+                            timeout=self._timeout
                         )
-                        
+
                         if response.status_code == 200:
+                            self._working_endpoint = endpoint
                             return self._parse_response(response.json())
                         else:
                             last_error = f"HTTP {response.status_code}: {response.text}"
-                            
+
                     elif response.status_code == 404:
                         # Endpoint doesn't exist, try next one
                         last_error = f"Endpoint not found: {endpoint}"
                         continue
                     else:
                         last_error = f"HTTP {response.status_code}: {response.text}"
-                        
+
                 except requests.exceptions.ConnectionError:
                     last_error = f"Connection failed to {endpoint}"
                     continue
@@ -134,8 +146,9 @@ class CustomTranscriber:
                 except Exception as e:
                     last_error = str(e)
                     continue
-            
+
             # If we get here, all endpoints failed
+            self._working_endpoint = None
             error_msg = f"Custom transcription failed. Last error: {last_error}"
             logger.error(error_msg)
             raise RuntimeError(error_msg)
@@ -178,17 +191,7 @@ class CustomTranscriber:
         else:
             return str(result)
 
-    def update_model(self, model: str) -> None:
-        """Update the model used for transcription"""
-        self.model = model
-        logger.info(f"Updated custom STT model to: {model}")
-
     def update_language(self, language: str) -> None:
         """Update the language used for transcription"""
         self.language = language
         logger.info(f"Updated custom STT language to: {language}")
-    
-    def update_base_url(self, base_url: str) -> None:
-        """Update the base URL for the custom endpoint"""
-        self.base_url = base_url.rstrip('/')
-        logger.info(f"Updated custom STT base URL to: {self.base_url}")

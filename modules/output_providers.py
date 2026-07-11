@@ -15,6 +15,8 @@ from typing import Callable, Dict, List, Optional
 import pyautogui
 import pyperclip
 
+from modules.settings import Settings
+
 logger = logging.getLogger('voice_typing')
 
 PLUGINS_DIR = Path.home() / "Documents" / "VoiceTyping" / "plugins"
@@ -69,8 +71,14 @@ class StandardOutputProvider(OutputProvider):
                 pyperclip.copy(text)
                 pyautogui.hotkey('ctrl', 'v')
 
-                # Restore original clipboard content after a small delay
-                root_after(100, lambda: pyperclip.copy(original_clipboard))
+                # Restore original clipboard content after a delay (slow paste
+                # targets read the clipboard late). pyperclip only round-trips
+                # text: an empty paste() means the clipboard held non-text
+                # (image/files) or nothing - restoring would clobber it with
+                # emptiness, so leave the transcript in the clipboard instead.
+                if original_clipboard:
+                    delay_ms = Settings().get('clipboard_restore_delay_ms')
+                    root_after(delay_ms, lambda: pyperclip.copy(original_clipboard))
         except Exception as e:
             logger.error(f"StandardOutputProvider: Error during text insertion: {e}")
 

@@ -1,14 +1,16 @@
+import ctypes
 import time
 from pynput import keyboard
 
 # Initialize state
 recording = False
 ctrl_pressed = False
+caps_down = False
+caps_passthrough = False
 
 def win32_event_filter(msg, data):
-    global ctrl_pressed, recording
+    global ctrl_pressed, recording, caps_down, caps_passthrough
 
-    # Key codes and messages
     VK_CONTROL = 0x11
     VK_LCONTROL = 0xA2
     VK_RCONTROL = 0xA3
@@ -17,7 +19,8 @@ def win32_event_filter(msg, data):
     WM_KEYDOWN = 0x0100
     WM_KEYUP = 0x0101
 
-    # Update Ctrl state for both left and right Ctrl keys
+    LLKHF_INJECTED = 0x10
+
     if data.vkCode in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL):
         if msg == WM_KEYDOWN:
             ctrl_pressed = True
@@ -25,19 +28,41 @@ def win32_event_filter(msg, data):
             ctrl_pressed = False
         return True
 
-    # Handle Caps Lock
-    if data.vkCode == VK_CAPITAL and msg == WM_KEYDOWN:
-        if ctrl_pressed:
-            # Allow normal Caps Lock behavior when Ctrl is pressed
+    if data.vkCode == VK_CAPITAL:
+        if data.flags & LLKHF_INJECTED:
             return True
-        else:
-            # Toggle recording and suppress Caps Lock
+
+        if msg == WM_KEYDOWN:
+            if ctrl_pressed:
+                caps_passthrough = True
+                return True
+
+            if caps_down:
+                listener.suppress_event()
+
+            caps_down = True
+            caps_passthrough = False
             recording = not recording
             print(f"Recording {'started' if recording else 'stopped'}")
+            correct_caps_lock_state()
             listener.suppress_event()
-            return False
+
+        elif msg == WM_KEYUP:
+            caps_down = False
+            if caps_passthrough:
+                caps_passthrough = False
+                return True
+            listener.suppress_event()
 
     return True
+
+def correct_caps_lock_state():
+    VK_CAPITAL = 0x14
+    if ctypes.windll.user32.GetKeyState(VK_CAPITAL) & 1:
+        KEYEVENTF_KEYUP = 0x0002
+        ctypes.windll.user32.keybd_event(VK_CAPITAL, 0x3A, 0, 0)
+        ctypes.windll.user32.keybd_event(VK_CAPITAL, 0x3A, KEYEVENTF_KEYUP, 0)
+        print("Corrected accidental Caps Lock activation")
 
 listener = keyboard.Listener(
     win32_event_filter=win32_event_filter,

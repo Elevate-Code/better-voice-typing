@@ -5,6 +5,32 @@
     "changelog": [
       {
         "category": "General",
+        "date": "2026-07-11",
+        "changes": [
+          "Fixed canceling an in-flight transcription leaving the indicator stuck on a pulsing status; canceling now resets the UI immediately.",
+          "Fixed a race where canceling a recording by clicking the indicator and immediately pressing Caps Lock could start a new recording while the previous one was still shutting down.",
+          "Fixed retrying a transcription racing with new recordings, which could delete or swap the audio file mid-retry.",
+          "Crash recovery now keeps the newest completed snapshot as a retry fallback instead of deleting it in favor of a possibly-partial temp recording.",
+          "Removed the unused Google STT placeholder provider, the never-implemented Smart Capture stub, and legacy dead code; saved settings referencing them are migrated automatically.",
+          "Fixed a disk leak where every recording was snapshotted to temp_audio.wav.N.wav and never deleted; the app now keeps only the most recent recording for retry and sweeps stale snapshots at startup.",
+          "Fixed thread-safety throughout the UI: all tkinter updates from the audio, processing, hotkey, and tray threads are now marshalled onto the main thread, eliminating a class of intermittent indicator freezes and glitches.",
+          "Fixed the status pulse animation accumulating multiple timers across status transitions, which caused accelerating flicker.",
+          "Fixed the audio level bar disappearing when a recording started while a warning message was showing.",
+          "Made Settings a shared singleton and moved settings.json to Documents/VoiceTyping (with automatic migration), fixing a bug where different modules could silently revert each other's saved settings.",
+          "Added a single-instance guard (named mutex) so launching the app twice no longer results in two competing keyboard hooks and tray icons.",
+          "Recordings are now uploaded as FLAC (lossless, roughly 40-50% smaller than WAV), reducing transcription latency and doubling the effective recording length under OpenAI's 25 MB upload cap.",
+          "Deferred heavy imports (litellm, OpenAI SDK) and cached transcriber clients, cutting app startup time by over 5 seconds and saving connection setup time on every transcription.",
+          "Added a max_recording_duration setting (default 15 minutes) that auto-stops and still transcribes, instead of silently failing on oversized uploads.",
+          "The recording indicator now shows elapsed recording time.",
+          "Transcription history is now persisted to Documents/VoiceTyping/history.json (last 50 entries with timestamps) so dictations survive restarts and crashes.",
+          "Added 'Open Settings File' and 'Open Logs Folder' items to the tray Settings menu.",
+          "Clipboard restore after pasting no longer wipes non-text clipboard content (images/files) and its delay is configurable via clipboard_restore_delay_ms.",
+          "The Google STT placeholder now raises an error instead of pasting placeholder text; custom STT endpoints use a fast connect timeout and remember the working endpoint.",
+          "Replaced console print calls with logger calls so errors are no longer lost to the hidden console window, and added a log_transcript_text setting to optionally keep transcript text out of log files."
+        ]
+      },
+      {
+        "category": "General",
         "date": "2025-07-23",
         "version": "0.6.6",
         "changes": [

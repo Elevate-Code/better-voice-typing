@@ -1,3 +1,4 @@
+import logging
 import threading
 from typing import Optional, Callable, Tuple, Any
 import time
@@ -8,6 +9,8 @@ import soundfile as sf
 
 from modules.settings import Settings
 
+logger = logging.getLogger('voice_typing')
+
 # NOTE: Optimized settings for speech recording
 # - 16kHz sample rate is optimal for STT, using 22.05kHz for safety margin
 # - 16-bit depth is standard for speech
@@ -15,17 +18,18 @@ from modules.settings import Settings
 # - WAV format ensures compatibility and quality
 # NOTE: Ends up being ~2.6 megabytes for every 60 seconds with these settings.
 
-# Initialize settings to get configurable values
 settings = Settings()
 
-# RMS threshold below which audio is considered silence
-# (-30 dB = 0.0316, -40 dB = 0.01, -50 dB = 0.003)
-# Configurable via settings.json
-SILENCE_THRESHOLD = settings.get('silence_threshold')
 # Minimum duration in seconds for valid recordings
 MIN_DURATION = 1.0
 # Time of continuous silence (in seconds) before auto-stopping
 DEFAULT_SILENT_START_TIMEOUT = 4.0
+
+
+def _silence_threshold() -> float:
+    """RMS threshold below which audio is considered silence.
+    (-30 dB = 0.0316, -40 dB = 0.01, -50 dB = 0.003) Configurable via settings.json."""
+    return settings.get('silence_threshold')
 
 class AudioRecorder:
     # Controls how smooth/reactive the audio level indicator bar appears in the UI
@@ -48,6 +52,8 @@ class AudioRecorder:
         self.silence_start: Optional[float] = None
         self.silent_start_timeout = silent_start_timeout
         self.auto_stopped = False
+        self.max_duration_reached = False
+        self.max_duration: Optional[float] = None
         self.recording_start_time: Optional[float] = None
         self.initial_sound_detected = False  # Track if we've detected any sound
 
@@ -65,11 +71,11 @@ class AudioRecorder:
             self.recording_start_time is not None and
             not self.initial_sound_detected):
 
-            if rms < SILENCE_THRESHOLD:
+            if rms < _silence_threshold():
                 if self.silence_start is None:
                     self.silence_start = time.time()
                 elif time.time() - self.silence_start >= self.silent_start_timeout:
-                    print(f"Stopping due to {self.silent_start_timeout}s of initial silence")
+                    logger.info(f"Stopping due to {self.silent_start_timeout}s of initial silence")
                     self.auto_stopped = True
                     self.recording = False
                     return 0.0
@@ -82,19 +88,16 @@ class AudioRecorder:
         self.smoothed_level = (self.SMOOTHING_FACTOR * current_level) + \
                               ((1 - self.SMOOTHING_FACTOR) * self.smoothed_level)
 
-        if self.level_callback:
-            self.level_callback(self.smoothed_level)
-
         return self.smoothed_level
 
-    def analyze_recording(self) -> Tuple[bool, str]:
+    def analyze_recording(self, filepath: Optional[str] = None) -> Tuple[bool, str]:
         """Analyze the recorded audio file for silence and duration.
 
         Returns:
             Tuple[bool, str]: (is_valid, reason_if_invalid)
         """
         try:
-            with sf.SoundFile(self.filename) as audio_file:
+            with sf.SoundFile(filepath or self.filename) as audio_file:
                 # Check duration
                 duration = len(audio_file) / audio_file.samplerate
                 if duration < MIN_DURATION:
@@ -107,9 +110,10 @@ class AudioRecorder:
                 rms = np.sqrt(np.mean(np.square(audio_data)))
 
                 # Check if mostly silence
-                if rms < SILENCE_THRESHOLD:
+                threshold = _silence_threshold()
+                if rms < threshold:
                     db_value = 20 * np.log10(max(1e-10, rms))
-                    return False, f"Recording contains mostly silence (RMS: {rms:.4f} / {db_value:.1f}dB < threshold: {SILENCE_THRESHOLD:.4f})"
+                    return False, f"Recording contains mostly silence (RMS: {rms:.4f} / {db_value:.1f}dB < threshold: {threshold:.4f})"
 
                 return True, ""
 
@@ -123,7 +127,7 @@ class AudioRecorder:
                          time_info: Any,
                          status: int) -> None:
             if status:
-                print(f'Audio callback status: {status}')
+                logger.warning(f'Audio callback status: {status}')
 
             with self._lock:
                 if not self.recording or self.file is None:
@@ -138,12 +142,21 @@ class AudioRecorder:
                         self.recording = False
                         raise sd.CallbackStop()
 
+                # Stop at max duration but keep the audio for transcription
+                if (self.max_duration is not None and
+                        self.recording_start_time is not None and
+                        time.time() - self.recording_start_time >= self.max_duration):
+                    logger.warning(f"Max recording duration ({self.max_duration}s) reached, auto-stopping")
+                    self.max_duration_reached = True
+                    self.recording = False
+                    raise sd.CallbackStop()
+
                 # Only write audio data if not auto-stopped
                 if not self.auto_stopped and self.file is not None:
                     try:
                         self.file.write(indata.copy())
                     except Exception as e:
-                        print(f"Audio callback error: {e}")
+                        logger.error(f"Audio callback error: {e}")
                         self.recording = False
                         raise sd.CallbackStop()
 
@@ -159,7 +172,7 @@ class AudioRecorder:
                     while self.recording:
                         sd.sleep(100)
         except Exception as e:
-            print(f"Recording error: {e}")
+            logger.error(f"Recording error: {e}", exc_info=True)
             self.auto_stopped = True
         finally:
             with self._lock:
@@ -179,6 +192,8 @@ class AudioRecorder:
     def start(self) -> None:
         """Start recording and reset silence detection"""
         self.auto_stopped = False
+        self.max_duration_reached = False
+        self.max_duration = settings.get('max_recording_duration')
         self.silence_start = None
         self.initial_sound_detected = False
         self.recording_start_time = time.time()
@@ -195,7 +210,7 @@ class AudioRecorder:
             # Add timeout to thread.join() to prevent hanging
             self.thread.join(timeout=2.0)
             if self.thread.is_alive():
-                print("Warning: Recording thread did not stop cleanly")
+                logger.warning("Recording thread did not stop cleanly")
                 # Force cleanup
                 with self._lock:
                     if self.stream is not None:

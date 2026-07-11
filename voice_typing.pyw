@@ -1,13 +1,11 @@
+import ctypes
 import os
 import sys
 import threading
 import subprocess
-import traceback
 from typing import Any, Callable, Optional, Tuple
 import logging
-from datetime import datetime
 from pathlib import Path
-import httpx
 import json
 
 from pynput import keyboard
@@ -25,6 +23,7 @@ from modules.audio_manager import set_input_device, get_default_device_id, Devic
 from modules.status_manager import StatusManager, AppStatus
 from modules.screen_utils import set_process_dpi_awareness, hide_console_window
 from modules.logger import setup_logging
+from modules.single_instance import acquire_single_instance_lock, release_single_instance_lock
 
 class VoiceTypingApp:
     def __init__(self) -> None:
@@ -60,9 +59,11 @@ class VoiceTypingApp:
         self.ui_feedback.set_click_callback(self.handle_ui_click)
         self.recording = False
 
-        # Initialize last_recording from existing temp file if present (allows retry after restart)
-        self.last_recording = self.recorder.filename if os.path.exists(self.recorder.filename) else None
+        # Recover the most recent recording for retry-after-restart, then sweep stale snapshots
+        self.last_recording = self._recover_last_recording()
         self.ctrl_pressed = False
+        self.caps_down = False
+        self.caps_passthrough = False
         self.clean_transcription_enabled = self.settings.get('clean_transcription')
         self.history = TranscriptionHistory()
 
@@ -74,9 +75,14 @@ class VoiceTypingApp:
             for error in plugin_errors:
                 self.logger.warning(f"Plugin error: {error}")
 
-        # Add a flag for canceling processing
+        # Per-recording generation counter to handle overlapping processing
         self.processing_thread: Optional[threading.Thread] = None
         self.cancel_flag = threading.Event()
+        self._recording_generation = 0
+        # Serializes start/stop transitions (hotkey presses arrive on separate threads)
+        self._toggle_lock = threading.RLock()
+        # Held for the process lifetime; released explicitly only on restart
+        self._instance_mutex: Optional[int] = None
 
         # Log settings information
         self.logger.info(f"Application settings:\n{json.dumps(self.settings.current_settings)}")
@@ -103,7 +109,6 @@ class VoiceTypingApp:
         self.ui_feedback.set_retry_callback(self.retry_transcription)
 
         def win32_event_filter(msg: int, data: Any) -> bool:
-            # Key codes and messages
             VK_CONTROL = 0x11
             VK_LCONTROL = 0xA2
             VK_RCONTROL = 0xA3
@@ -112,6 +117,8 @@ class VoiceTypingApp:
             WM_KEYDOWN = 0x0100
             WM_KEYUP = 0x0101
 
+            LLKHF_INJECTED = 0x10
+
             if data.vkCode in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL):
                 if msg == WM_KEYDOWN:
                     self.ctrl_pressed = True
@@ -119,18 +126,32 @@ class VoiceTypingApp:
                     self.ctrl_pressed = False
                 return True
 
-            # Handle Caps Lock
-            if data.vkCode == VK_CAPITAL and msg == WM_KEYDOWN:
-                if self.ctrl_pressed:
-                    # Allow normal Caps Lock behavior when Ctrl is pressed
+            if data.vkCode == VK_CAPITAL:
+                # Let our own corrective keystrokes pass through
+                if data.flags & LLKHF_INJECTED:
                     return True
-                else:
-                    # Toggle recording and suppress default Caps Lock behavior. Returning False is not always sufficient
-                    # to prevent the OS from toggling the Caps Lock state, so suppress_event() is used.
-                    # TODO: watch this as it still seems to be a bit flaky
-                    self.toggle_recording()
+
+                if msg == WM_KEYDOWN:
+                    if self.ctrl_pressed:
+                        self.caps_passthrough = True
+                        return True
+
+                    if self.caps_down:
+                        # suppress_event() RAISES (exiting this filter), so OS
+                        # key-repeat stops here and never re-toggles recording
+                        self.listener.suppress_event()
+
+                    self.caps_down = True
+                    self.caps_passthrough = False
+                    threading.Thread(target=self._on_caps_lock_press, daemon=True).start()
                     self.listener.suppress_event()
-                    return False
+
+                elif msg == WM_KEYUP:
+                    self.caps_down = False
+                    if self.caps_passthrough:
+                        self.caps_passthrough = False
+                        return True
+                    self.listener.suppress_event()
 
             return True
 
@@ -203,68 +224,152 @@ class VoiceTypingApp:
         if self.update_icon_menu:
             self.update_icon_menu()
 
+    def _on_caps_lock_press(self) -> None:
+        """Handle Caps Lock press off the hook thread, keeping the hook callback fast."""
+        self.toggle_recording()
+        import time
+        time.sleep(0.05)
+        self._correct_caps_lock_state()
+
+    def _correct_caps_lock_state(self) -> None:
+        """Force Caps Lock off if it was accidentally toggled on."""
+        VK_CAPITAL = 0x14
+        if ctypes.windll.user32.GetKeyState(VK_CAPITAL) & 1:
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_CAPITAL, 0x3A, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_CAPITAL, 0x3A, KEYEVENTF_KEYUP, 0)
+            self.logger.debug("Corrected accidental Caps Lock activation")
+
+    def _snapshot_paths(self) -> list[Path]:
+        """All snapshot files (temp_audio.wav.N.wav), newest first."""
+        base = Path(self.recorder.filename).resolve()
+        snapshots = list(base.parent.glob(base.name + '.*.wav'))
+        return sorted(snapshots, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def _sweep_snapshots(self, keep: Optional[str] = None) -> None:
+        """Delete snapshot files, optionally keeping one (the current retry candidate)."""
+        keep_path = Path(keep).resolve() if keep else None
+        for snapshot in self._snapshot_paths():
+            if keep_path and snapshot.resolve() == keep_path:
+                continue
+            try:
+                snapshot.unlink()
+            except OSError as e:
+                self.logger.warning(f"Could not delete old snapshot {snapshot}: {e}")
+
+    def _recover_last_recording(self) -> Optional[str]:
+        """Find the most recent recording after a restart and clean up the rest."""
+        snapshots = self._snapshot_paths()
+        newest_snapshot = str(snapshots[0]) if snapshots else None
+        # Always keep the newest snapshot, even when a bare temp_audio.wav
+        # exists: the bare file may be a partial recording from a crash, and
+        # the snapshot is the only good retry candidate if it turns out bad.
+        # (The next completed recording sweeps it away.)
+        self._sweep_snapshots(keep=newest_snapshot)
+        if os.path.exists(self.recorder.filename):
+            return self.recorder.filename
+        return newest_snapshot
+
     def toggle_recording(self) -> None:
-        if not self.recording:
-            self.logger.info("🎙️ Starting recording...")
-            # Clear last recording when starting a new one
-            self.last_recording = None
-            self.recording = True
-            self.recorder.start()
-            self.status_manager.set_status(AppStatus.RECORDING)
-            # Start periodic status checks
-            self._check_recorder_status()
-        else:
-            self._stop_recording()
+        with self._toggle_lock:
+            if not self.recording:
+                # Cancel any in-flight processing before starting a new recording
+                if self.processing_thread and self.processing_thread.is_alive():
+                    self.cancel_flag.set()
+                    self.logger.info("Cancelled in-flight processing for new recording")
+                self._recording_generation += 1
+                self.logger.info("🎙️ Starting recording...")
+                self.last_recording = None
+                self.recording = True
+                self.recorder.start()
+                self.status_manager.set_status(AppStatus.RECORDING)
+                self.ui_feedback.call_on_main(self._check_recorder_status)
+            else:
+                self._stop_recording()
 
     def _stop_recording(self) -> None:
         """Helper method to handle recording stop logic"""
-        self.recording = False
-        self.recorder.stop()
-        self.logger.info("Recording stopped via keyboard shortcut")
+        with self._toggle_lock:
+            self.recording = False
+            gen = self._recording_generation
+            self.recorder.stop()
+            self.logger.info("Recording stopped")
 
-        if self.recorder.was_auto_stopped():
-            self.status_manager.set_status(
-                AppStatus.ERROR,
-                "⚠️ Recording stopped: No audio detected"
-            )
-            self.logger.warning("Recording auto-stopped due to initial silence")
-            # Clear the auto-stopped flag
-            self.recorder.auto_stopped = False
-        else:
+            # If a new recording started while we were stopping, bail out entirely
+            if gen != self._recording_generation:
+                self.logger.info("Skipping processing — superseded by new recording")
+                return
+
+            if self.recorder.was_auto_stopped():
+                self.status_manager.set_status(
+                    AppStatus.ERROR,
+                    "⚠️ Recording stopped: No audio detected"
+                )
+                self.logger.warning("Recording auto-stopped due to initial silence")
+                self.recorder.auto_stopped = False
+                return
+
+            if self.recorder.max_duration_reached:
+                self.logger.warning("Recording hit max duration; transcribing what was captured")
+                self.recorder.max_duration_reached = False
+
+            # Snapshot path so a new recording can't overwrite the file mid-transcription
+            recording_path = self.recorder.filename
+            if os.path.exists(recording_path):
+                snapshot_path = recording_path + f".{gen}.wav"
+                try:
+                    os.replace(recording_path, snapshot_path)
+                    self.last_recording = snapshot_path
+                except OSError:
+                    self.last_recording = recording_path
+            else:
+                self.last_recording = recording_path
+            # Older snapshots are no longer retry candidates; drop them
+            self._sweep_snapshots(keep=self.last_recording)
             self.status_manager.set_status(AppStatus.PROCESSING)
             self.process_audio()
 
     # Add this method to check recorder status periodically
     def _check_recorder_status(self) -> None:
-        """Periodically check if recorder has auto-stopped"""
-        if self.recording and self.recorder.was_auto_stopped():
-            self._stop_recording()
+        """Periodically check if recorder has auto-stopped and guard recording UI."""
+        if self.recording and (self.recorder.was_auto_stopped() or self.recorder.max_duration_reached):
+            threading.Thread(target=self._stop_recording, daemon=True).start()
+            return
 
         if self.recording:
-            # Schedule next check in 100ms
+            # Self-heal: if a stale processing thread overwrote our status, reassert it
+            if self.status_manager.current_status != AppStatus.RECORDING:
+                self.status_manager.set_status(AppStatus.RECORDING)
             self.ui_feedback.root.after(100, self._check_recorder_status)
 
     def process_audio(self) -> None:
         try:
-            self.cancel_flag.clear()  # Reset flag before starting
-            self.processing_thread = threading.Thread(target=self._process_audio_thread)
+            self.cancel_flag.clear()
+            gen = self._recording_generation
+            self.processing_thread = threading.Thread(
+                target=self._process_audio_thread, args=(gen,))
             self.processing_thread.start()
         except Exception as e:
             self.logger.error("Failed to start processing thread", exc_info=True)
             self.logger.debug(f"Thread state: {threading.current_thread().name}")
             self.ui_feedback.insert_text(f"Error: {str(e)[:50]}...")
 
-    def _process_audio_thread(self) -> None:
+    def _is_stale(self, gen: int) -> bool:
+        """Check if this processing run has been superseded by a newer recording."""
+        return gen != self._recording_generation or self.cancel_flag.is_set()
+
+    def _process_audio_thread(self, gen: int) -> None:
         try:
             self.logger.info("Starting audio processing")
-            is_valid, reason = self.recorder.analyze_recording()
+            is_valid, reason = self.recorder.analyze_recording(self.last_recording)
 
-            if self.cancel_flag.is_set():
-                self.logger.info("Processing cancelled before transcription.")
-                self.status_manager.set_status(AppStatus.IDLE)
+            if self._is_stale(gen):
+                self.logger.info("Processing cancelled (stale generation).")
                 return
 
             if not is_valid:
+                if self._is_stale(gen):
+                    return
                 self.logger.warning(f"Skipping transcription: {reason}")
                 self.status_manager.set_status(
                     AppStatus.ERROR,
@@ -272,19 +377,16 @@ class VoiceTypingApp:
                 )
                 return
 
-            # Store recording path for retry functionality
-            self.last_recording = self.recorder.filename
-
             self.logger.info("Starting transcription")
             success, result = self._attempt_transcription()
 
-            if self.cancel_flag.is_set():
-                self.logger.info("Processing cancelled after transcription.")
-                self.status_manager.set_status(AppStatus.IDLE)
+            if self._is_stale(gen):
+                self.logger.info("Processing cancelled (stale generation).")
                 return
 
             if not success:
-                # Check if it was a timeout error
+                if self._is_stale(gen):
+                    return
                 if result == "timeout":
                     self.ui_feedback.show_error_with_retry("⏱️ Request timed out - try again")
                     self.status_manager.set_status(AppStatus.ERROR, "⏱️ Request timed out")
@@ -292,20 +394,25 @@ class VoiceTypingApp:
                     self.ui_feedback.show_error_with_retry("⚠️ Transcription failed")
                     self.status_manager.set_status(AppStatus.ERROR, "⚠️ Error processing audio")
             elif result:
+                if self._is_stale(gen):
+                    return
                 self.history.add(result)
                 output_mode = self.settings.get('output_mode')
                 self.ui_feedback.insert_text(result, output_mode=output_mode)
                 if self.update_icon_menu:
                     self.update_icon_menu()
                 self.status_manager.set_status(AppStatus.IDLE)
-                # Log transcription result with preview
-                preview_len = 50
-                preview = result[:preview_len] + "..." if len(result) > preview_len else result
-                self.logger.info(f"Transcription completed ({len(result)} chars): {preview}")
+                if self.settings.get('log_transcript_text'):
+                    preview_len = 50
+                    preview = result[:preview_len] + "..." if len(result) > preview_len else result
+                    self.logger.info(f"Transcription completed ({len(result)} chars): {preview}")
+                else:
+                    self.logger.info(f"Transcription completed ({len(result)} chars)")
 
         except Exception as e:
+            if self._is_stale(gen):
+                return
             self.logger.error("Error in _process_audio_thread:", exc_info=True)
-            # Check if it's a timeout exception
             if 'timeout' in str(e).lower():
                 self.ui_feedback.show_error_with_retry("⏱️ Request timed out - try again")
                 self.status_manager.set_status(AppStatus.ERROR, "⏱️ Request timed out")
@@ -313,16 +420,22 @@ class VoiceTypingApp:
                 self.ui_feedback.show_error_with_retry("⚠️ Transcription failed")
                 self.status_manager.set_status(AppStatus.ERROR, "⚠️ Error processing audio")
 
-    def _attempt_transcription(self) -> Tuple[bool, Optional[str]]:
-        """Attempt transcription and return (success, result or error_type)"""
+    def _attempt_transcription(self, recording_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+        """Attempt transcription and return (success, result or error_type).
+
+        Pass recording_path explicitly when the caller may run concurrently
+        with new recordings (retry), since self.last_recording is mutable."""
         try:
-            if not self.last_recording:
+            path = recording_path or self.last_recording
+            if not path:
                 self.logger.error("Attempted transcription with no recording available.")
                 return False, "no_recording"
 
-            # Update status to show we're transcribing
-            self.status_manager.set_status(AppStatus.TRANSCRIBING)
-            text = transcribe_audio(self.last_recording)
+            # Update status to show we're transcribing (skip if already cancelled,
+            # so a cancel can't be overwritten by a stale pulsing status)
+            if not self.cancel_flag.is_set():
+                self.status_manager.set_status(AppStatus.TRANSCRIBING)
+            text = transcribe_audio(path)
 
             if self.cancel_flag.is_set():
                 return False, "cancelled"
@@ -330,7 +443,8 @@ class VoiceTypingApp:
             if self.clean_transcription_enabled:
                 try:
                     # Update status to show we're cleaning
-                    self.status_manager.set_status(AppStatus.CLEANING)
+                    if not self.cancel_flag.is_set():
+                        self.status_manager.set_status(AppStatus.CLEANING)
 
                     # Get the configured LLM model and timeout from settings
                     llm_model = self.settings.get('llm_model')
@@ -357,12 +471,15 @@ class VoiceTypingApp:
 
     def retry_transcription(self) -> None:
         """Retry transcription of last failed recording"""
-        if not self.last_recording:
+        # Capture the path now: self.last_recording can be cleared/replaced by
+        # a new recording while the retry is in flight
+        recording_path = self.last_recording
+        if not recording_path:
             return
 
         def retry_thread():
             self.status_manager.set_status(AppStatus.PROCESSING)
-            success, result = self._attempt_transcription()
+            success, result = self._attempt_transcription(recording_path)
 
             if success and result:
                 self.history.add(result)
@@ -376,7 +493,7 @@ class VoiceTypingApp:
                 self.ui_feedback.show_error_with_retry("⚠️ Retry failed")
                 self.status_manager.set_status(AppStatus.ERROR)
 
-        threading.Thread(target=retry_thread).start()
+        threading.Thread(target=retry_thread, daemon=True).start()
 
     def toggle_clean_transcription(self) -> None:
         self.clean_transcription_enabled = not self.clean_transcription_enabled
@@ -408,22 +525,24 @@ class VoiceTypingApp:
         status = self.status_manager.current_status
         if status == AppStatus.RECORDING:
             self.logger.info("Canceling recording...")
-            self.recording = False
-            threading.Thread(target=self._stop_recorder).start()
+            threading.Thread(target=self._cancel_recording, daemon=True).start()
             self.status_manager.set_status(AppStatus.IDLE)
         elif status in (AppStatus.PROCESSING, AppStatus.TRANSCRIBING, AppStatus.CLEANING):
             self.logger.info("Canceling processing...")
             if self.processing_thread and self.processing_thread.is_alive():
                 self.cancel_flag.set()
-                # The processing thread will set the status to IDLE upon graceful exit
+            # The processing thread exits silently once it notices the flag;
+            # reset the UI here so it can't be left stuck on a pulsing status
+            self.status_manager.set_status(AppStatus.IDLE)
 
-    def _stop_recorder(self) -> None:
-        """Helper method to stop recorder in a separate thread"""
-        try:
-            self.recorder.stop()
-        except Exception as e:
-            self.logger.error("Error stopping recorder", exc_info=True)
-            self.logger.debug(f"Recorder state: recording={self.recording}")
+    def _cancel_recording(self) -> None:
+        """Stop and discard the current recording, serialized against hotkey toggles."""
+        with self._toggle_lock:
+            self.recording = False
+            try:
+                self.recorder.stop()
+            except Exception:
+                self.logger.error("Error stopping recorder", exc_info=True)
 
     def toggle_favorite_microphone(self, device_id: int) -> None:
         """Toggle favorite status for a microphone device"""
@@ -456,6 +575,9 @@ class VoiceTypingApp:
             # We pass sys.argv to the new process to restart with the same arguments.
             # This is more reliable than os.startfile as it doesn't depend on file associations.
             self.logger.debug(f"Restarting with command: {[sys.executable] + sys.argv}")
+            # Hand off the single-instance mutex so the new instance can acquire it
+            release_single_instance_lock(self._instance_mutex)
+            self._instance_mutex = None
             subprocess.Popen([sys.executable] + sys.argv)
 
             # Exit current instance
@@ -464,9 +586,31 @@ class VoiceTypingApp:
             logging.shutdown()
             os._exit(0)
         except Exception as e:
+            # Restart failed and we're staying alive: retake the single-instance
+            # guard that was released for the hand-off
+            if self._instance_mutex is None:
+                self._instance_mutex = acquire_single_instance_lock()
             self.logger.error(f"Failed to restart application: {e}", exc_info=True)
             self.status_manager.set_status(AppStatus.ERROR, "⚠️ Failed to restart")
 
 if __name__ == "__main__":
+    mutex = acquire_single_instance_lock()
+    if mutex is None:
+        # Another instance is already running; tell the user and bail out
+        try:
+            import tkinter as tk
+            from tkinter import messagebox
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showwarning(
+                "Voice Typing",
+                "Voice Typing is already running.\nCheck the system tray for the microphone icon."
+            )
+            root.destroy()
+        except Exception:
+            pass
+        sys.exit(0)
+
     app = VoiceTypingApp()
+    app._instance_mutex = mutex
     app.run()
