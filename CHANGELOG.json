@@ -5,6 +5,49 @@
     "changelog": [
       {
         "category": "General",
+        "date": "2026-07-22",
+        "changes": [
+          "Meeting Mode and Phone Mode now record as continuous sessions: pressing Caps Lock no longer stops the recording — it sends everything captured since the last press for transcription and recording resumes immediately (sub-second gap mic-only; up to a couple of seconds in Meeting Mode while the 2-channel file is composed), so no conversation audio is lost while waiting for a transcript mid-call.",
+          "Chunks transcribe concurrently in the background but their transcripts are inserted at the cursor strictly in order — a fast later chunk waits for a slow earlier one, so the assembled transcript always reads chronologically.",
+          "To end a session, click the recording indicator or toggle the mode off in the tray; audio captured since the last send is discarded by design (press Caps Lock first to keep it). The indicator label now reads 'caps=send · click=end' in these modes.",
+          "Phone Mode chunk transcripts are prefixed with a '--- [chunk N] ---' header because diarization speaker labels are assigned per request and can swap identities between chunks; the header signals that labels only hold within a chunk.",
+          "A chunk that fails to transcribe retries once automatically (with a note shown in the recording label), and if it fails again its audio is kept for Retry Last Transcription in the tray while the session carries on; the snapshot sweeper no longer touches chunk files that are still queued.",
+          "Quiet chunks (nothing said since the last send) are skipped silently instead of flashing an error, the silent-start auto-cancel only applies to a session's first chunk, and hitting the max recording duration mid-session auto-sends the chunk and keeps recording instead of stopping.",
+          "Phone Mode transcripts are now unlabeled by default: speaker turns still get their own lines, but the generic 'Speaker N' labels — which are assigned per chunk and can swap identities between chunks of a session — are dropped. Set phone_speaker_labels: true in settings.json to restore them.",
+          "The first chunk delivered in a meeting/phone session is prefixed with a short bracketed transcript-limitations note addressed to whoever reads the paste (typically an AI assistant): proper nouns, abbreviations, and speaker attribution may be wrong, so interpret quietly from context without surfacing corrections. Disable via session_preamble: false in settings.json.",
+          "Hardened the session machinery after an independent review: a draining session queue can no longer alter a later dictation's status or retry candidate, cancelling a dictation no longer discards queued session chunks, snapshot enumeration tolerates chunk files deleted mid-scan, the recorder watchdog is token-scoped so duplicate polling chains can't double-fire stop/flush, mode toggles are atomic with session start/end, a cancelled chunk no longer burns a retry API call, and a dismissing warning can no longer hide the indicator while a recording is live.",
+          "Phone Mode can now identify YOUR voice via ElevenLabs' workspace speaker library (dashboard: Speech to Text -> Speakers): enroll 10-60s of solo audio and set phone_my_speaker_id to your registered Speaker ID, and matched words return that ID instead of speaker_N (verified empirically), giving stable 'Me:' / 'Them:' labels across all session chunks. Other enrolled speakers are labeled by their prettified slug; if no voice matches in a chunk, output falls back to unlabeled turns. Controlled by use_speaker_library (default true; harmless no-op when the library is empty).",
+          "Added phone_diarization_threshold (default 0.3), which replaces the phone_num_speakers hint when set. A seeded 0.1-0.4 sweep on a 4-speaker meeting recording showed the parameter also gates speaker-library match acceptance: diarization clusters were identical at every value, but the enrolled speaker only matched at thresholds >= 0.26 (~98% word accuracy, stable through 0.4) while the API default (~0.22) rejected the match entirely. 0.3 sits mid-plateau with margin. The session preamble now explains the Me/Them voice-matched labels when phone_my_speaker_id is configured."
+        ]
+      },
+      {
+        "category": "General",
+        "date": "2026-07-21",
+        "changes": [
+          "Added Phone Mode (tray menu toggle) for conversations happening in the room — a call on speakerphone or an in-person chat where all voices reach the microphone. Recording stays mic-only and transcripts come back diarized with 'Speaker 1:' / 'Speaker 2:' labels in order of first appearance. Requires ELEVENLABS_API_KEY in .env.",
+          "Phone recordings are tagged via WAV metadata so they route to ElevenLabs Scribe voice diarization even across retries and app restarts; the expected speaker count is configurable via phone_num_speakers in settings.json (default 2).",
+          "Meeting Mode and Phone Mode are mutually exclusive — enabling one automatically turns the other off. LLM transcript cleaning is skipped for phone recordings to preserve speaker labels, same as meeting recordings.",
+          "The recording indicator now shows a mode-specific color and label while recording: crimson-pink 'Recording meeting' for Meeting Mode and violet 'Recording call' for Phone Mode, so the active mode is visible at a glance without clashing with the other status colors (blue processing, indigo transcribing, teal cleaning, orange error).",
+          "Added Streaming Dictation (Beta, Settings menu toggle): normal dictation is transcribed over an OpenAI Realtime websocket while you are still speaking, so text is ready ~1-3 seconds after you stop regardless of recording length (previously the wait grew with clip length). Applies to normal mode only; Meeting and Phone modes keep their batch pipelines.",
+          "Streaming recordings are captured at 24 kHz to match the Realtime API's PCM format, and the WAV file is still written in parallel: if the websocket fails at any point (connect, mid-recording, or during the final flush) the app falls back to the regular batch upload automatically, so streaming can only make transcription faster, never less reliable.",
+          "The streaming session flushes the final speech turn with synthetic silence before closing, preventing the last sentence from being cut off when recording stops immediately after the last word.",
+          "Fixed the streaming session dying on speech turns longer than ~10 seconds: the websocket read timeout was treated as fatal, but the server legitimately sends no events during a long uninterrupted turn.",
+          "Tuned streaming VAD defaults after WER benchmarking (st-vtt-bench): lowered the speech-detection threshold from 0.5 to 0.3 and disabled near-field noise reduction, which together were silently discarding quiet and phone-bandwidth speech (86% word loss on a phone-call sample; now captures it).",
+          "Switched streaming turn detection from energy-based server_vad to semantic_vad (model-based) after further benchmarking: on casual dictation audio it cut missed words from ~16% to ~4% and brought overall streaming WER below even the batch gpt-4o-transcribe pipeline (15.1% vs 17.1%), while matching batch on clean narration (2.7%). Tail-capture verified 3/3 with the new turn detector."
+        ]
+      },
+      {
+        "category": "General",
+        "date": "2026-07-20",
+        "changes": [
+          "Added Meeting Mode (tray menu toggle): Caps Lock recordings capture your microphone plus system audio (whatever you hear) as separate channels, and transcripts come back speaker-labeled ('Me:' / 'Them:') — ideal for capturing both sides of a call. Requires ELEVENLABS_API_KEY in .env.",
+          "Meeting recordings are transcribed with ElevenLabs Scribe v2 multichannel mode, attributing speakers by channel (your mic is always 'Me') instead of relying on voice diarization; speaker labels are configurable via meeting_speaker_you/meeting_speaker_them in settings.json.",
+          "If system-audio capture is unavailable (e.g. output device issues), meeting-mode recordings fall back to normal mic-only dictation automatically.",
+          "Silent-start auto-cancel is skipped in meeting mode so clips where only the other party is speaking are not discarded; LLM transcript cleaning is also skipped to preserve speaker labels."
+        ]
+      },
+      {
+        "category": "General",
         "date": "2026-07-11",
         "version": "0.7.1",
         "changes": [

@@ -318,12 +318,27 @@ class TrayIconManager:
                 pystray.Menu(*microphone_menu)
             ),
             pystray.MenuItem(
+                '🎧 Meeting Mode',
+                lambda icon, item: app.toggle_meeting_mode(),
+                checked=lambda item: bool(app.settings.get('meeting_mode'))
+            ),
+            pystray.MenuItem(
+                '📞 Phone Mode',
+                lambda icon, item: app.toggle_phone_mode(),
+                checked=lambda item: bool(app.settings.get('phone_mode'))
+            ),
+            pystray.MenuItem(
                 'Settings',
                 pystray.Menu(
                     pystray.MenuItem(
                         'Clean Transcription',
                         lambda icon, item: app.toggle_clean_transcription(),
                         checked=lambda item: app.settings.get('clean_transcription')
+                    ),
+                    pystray.MenuItem(
+                        'Streaming Dictation (Beta)',
+                        lambda icon, item: app.toggle_streaming_dictation(),
+                        checked=lambda item: bool(app.settings.get('streaming_dictation'))
                     ),
                     pystray.MenuItem(
                         'Silent-Start Timeout',

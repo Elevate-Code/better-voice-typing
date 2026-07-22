@@ -2,6 +2,7 @@ import ctypes
 import os
 import sys
 import threading
+import time
 import subprocess
 from typing import Any, Callable, Optional, Tuple
 import logging
@@ -11,16 +12,17 @@ import json
 from pynput import keyboard
 import pyperclip
 
+from modules.chunk_queue import ChunkQueue
 from modules.clean_text import clean_transcription
 from modules.history import TranscriptionHistory
 from modules.output_providers import initialize_providers
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
 from modules.settings import Settings
-from modules.transcribe import transcribe_audio
+from modules.transcribe import transcribe_audio, is_conversation_recording
 from modules.tray import setup_tray_icon
 from modules.ui import UIFeedback
 from modules.audio_manager import set_input_device, get_default_device_id, DeviceIdentifier, find_device_by_identifier
-from modules.status_manager import StatusManager, AppStatus
+from modules.status_manager import StatusManager, AppStatus, RECORDING_STATUSES
 from modules.screen_utils import set_process_dpi_awareness, hide_console_window
 from modules.logger import setup_logging
 from modules.single_instance import acquire_single_instance_lock, release_single_instance_lock
@@ -59,6 +61,19 @@ class VoiceTypingApp:
         self.ui_feedback.set_click_callback(self.handle_ui_click)
         self.recording = False
 
+        # Continuous conversation session (meeting/phone mode): caps lock
+        # flushes a chunk and keeps recording; indicator click ends the session.
+        # Recent queues stay sweep-protected while their deliveries drain.
+        # (Initialized before _recover_last_recording, which sweeps snapshots.)
+        self._session_active = False
+        self._chunk_queue: Optional[ChunkQueue] = None
+        self._recent_queues: list[ChunkQueue] = []
+        self._note_hold_until = 0.0
+        # Scopes the recorder watchdog to the recording that scheduled it, so
+        # a leftover poll from a just-stopped recording can't start a second
+        # concurrent chain (which could double-fire stop/flush actions)
+        self._watchdog_token = 0
+
         # Recover the most recent recording for retry-after-restart, then sweep stale snapshots
         self.last_recording = self._recover_last_recording()
         self.ctrl_pressed = False
@@ -79,6 +94,11 @@ class VoiceTypingApp:
         self.processing_thread: Optional[threading.Thread] = None
         self.cancel_flag = threading.Event()
         self._recording_generation = 0
+        # Live streaming-transcription session for the current recording
+        # (normal dictation mode with streaming_dictation enabled)
+        self._streaming_session = None
+        # Which recording status the current recording uses (varies by mode)
+        self._active_recording_status = AppStatus.RECORDING
         # Serializes start/stop transitions (hotkey presses arrive on separate threads)
         self._toggle_lock = threading.RLock()
         # Held for the process lifetime; released explicitly only on restart
@@ -227,7 +247,6 @@ class VoiceTypingApp:
     def _on_caps_lock_press(self) -> None:
         """Handle Caps Lock press off the hook thread, keeping the hook callback fast."""
         self.toggle_recording()
-        import time
         time.sleep(0.05)
         self._correct_caps_lock_state()
 
@@ -242,15 +261,25 @@ class VoiceTypingApp:
 
     def _snapshot_paths(self) -> list[Path]:
         """All snapshot files (temp_audio.wav.N.wav), newest first."""
+        def mtime(p: Path) -> float:
+            # Chunk deliveries delete their files concurrently; a snapshot
+            # vanishing between glob and stat must not blow up the caller
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
         base = Path(self.recorder.filename).resolve()
         snapshots = list(base.parent.glob(base.name + '.*.wav'))
-        return sorted(snapshots, key=lambda p: p.stat().st_mtime, reverse=True)
+        return sorted(snapshots, key=mtime, reverse=True)
 
     def _sweep_snapshots(self, keep: Optional[str] = None) -> None:
-        """Delete snapshot files, optionally keeping one (the current retry candidate)."""
-        keep_path = Path(keep).resolve() if keep else None
+        """Delete snapshot files, keeping the current retry candidate plus any
+        chunk files a conversation session's queue still needs."""
+        keep_paths = {Path(keep).resolve()} if keep else set()
+        for queue in self._recent_queues:
+            keep_paths.update(Path(p).resolve() for p in queue.active_paths())
         for snapshot in self._snapshot_paths():
-            if keep_path and snapshot.resolve() == keep_path:
+            if snapshot.resolve() in keep_paths:
                 continue
             try:
                 snapshot.unlink()
@@ -278,12 +307,56 @@ class VoiceTypingApp:
                     self.cancel_flag.set()
                     self.logger.info("Cancelled in-flight processing for new recording")
                 self._recording_generation += 1
-                self.logger.info("🎙️ Starting recording...")
+                self.recorder.meeting_mode = bool(self.settings.get('meeting_mode'))
+                self.recorder.phone_mode = (not self.recorder.meeting_mode and
+                                            bool(self.settings.get('phone_mode')))
+                if self.recorder.meeting_mode:
+                    mode_note = " (meeting mode)"
+                    self._active_recording_status = AppStatus.RECORDING_MEETING
+                elif self.recorder.phone_mode:
+                    mode_note = " (phone mode)"
+                    self._active_recording_status = AppStatus.RECORDING_PHONE
+                else:
+                    mode_note = ""
+                    self._active_recording_status = AppStatus.RECORDING
+
+                # Streaming dictation (beta): open a realtime session so the
+                # transcript is ready ~immediately on stop. Normal mode only;
+                # meeting/phone need their multi-speaker batch pipelines.
+                if self._streaming_session is not None:
+                    self._streaming_session.abort()  # stale leftover
+                    self._streaming_session = None
+                if (not self.recorder.meeting_mode and not self.recorder.phone_mode
+                        and self.settings.get('streaming_dictation')):
+                    self._streaming_session = self._start_streaming_session()
+                if self._streaming_session is not None:
+                    from services.openai_realtime_stt import REALTIME_SAMPLE_RATE
+                    self.recorder.samplerate = REALTIME_SAMPLE_RATE
+                    self.recorder.stream_callback = self._streaming_session.feed
+                    mode_note = " (streaming)"
+                else:
+                    self.recorder.samplerate = 22050
+                    self.recorder.stream_callback = None
+
+                # Meeting/phone recordings run as a continuous session: caps
+                # flushes chunks into an ordered transcription queue while
+                # recording continues; clicking the indicator ends the session
+                self.recorder.continuation_chunk = False
+                if self.recorder.meeting_mode or self.recorder.phone_mode:
+                    self._chunk_queue = self._make_chunk_queue(
+                        phone=self.recorder.phone_mode)
+                    self._session_active = True
+
+                self.logger.info(f"🎙️ Starting recording...{mode_note}")
                 self.last_recording = None
                 self.recording = True
                 self.recorder.start()
-                self.status_manager.set_status(AppStatus.RECORDING)
-                self.ui_feedback.call_on_main(self._check_recorder_status)
+                self.status_manager.set_status(self._active_recording_status)
+                self._watchdog_token += 1
+                token = self._watchdog_token
+                self.ui_feedback.call_on_main(lambda: self._check_recorder_status(token))
+            elif self._session_active:
+                self._flush_chunk()
             else:
                 self._stop_recording()
 
@@ -295,12 +368,20 @@ class VoiceTypingApp:
             self.recorder.stop()
             self.logger.info("Recording stopped")
 
+            # Detach the streaming session from app state; from here it either
+            # travels with this recording's processing or gets aborted
+            stream_session, self._streaming_session = self._streaming_session, None
+
             # If a new recording started while we were stopping, bail out entirely
             if gen != self._recording_generation:
+                if stream_session is not None:
+                    stream_session.abort()
                 self.logger.info("Skipping processing — superseded by new recording")
                 return
 
             if self.recorder.was_auto_stopped():
+                if stream_session is not None:
+                    stream_session.abort()
                 self.status_manager.set_status(
                     AppStatus.ERROR,
                     "⚠️ Recording stopped: No audio detected"
@@ -327,29 +408,271 @@ class VoiceTypingApp:
             # Older snapshots are no longer retry candidates; drop them
             self._sweep_snapshots(keep=self.last_recording)
             self.status_manager.set_status(AppStatus.PROCESSING)
-            self.process_audio()
+            self.process_audio(stream_session)
+
+    def _flush_chunk(self) -> None:
+        """Seal the current chunk, queue it for transcription, resume recording.
+
+        The gap between stop and restart is the quick-restart cost the session
+        design accepts (~0.3s mic-only, up to ~1-2s in meeting mode where the
+        loopback thread is rejoined and the 2-channel file composed)."""
+        with self._toggle_lock:
+            if not (self.recording and self._session_active):
+                return
+            self.recorder.stop()
+            self._recording_generation += 1
+            gen = self._recording_generation
+            path = self.recorder.filename
+            if os.path.exists(path):
+                snapshot = path + f".{gen}.wav"
+                try:
+                    os.replace(path, snapshot)
+                except OSError:
+                    snapshot = None
+                    self.logger.error("Could not snapshot chunk; skipping it", exc_info=True)
+                if snapshot:
+                    is_valid, reason = self.recorder.analyze_recording(snapshot)
+                    if is_valid:
+                        index = self._chunk_queue.submit(snapshot)
+                        self.logger.info(f"Chunk {index} queued for transcription")
+                    else:
+                        # Quiet flush (nothing said since the last one): drop it
+                        # without the error flash a failed dictation would get
+                        self.logger.info(f"Skipping chunk: {reason}")
+                        try:
+                            os.remove(snapshot)
+                        except OSError:
+                            pass
+            self.recorder.continuation_chunk = True
+            self.recorder.start()
+
+    def _end_session(self, auto_stopped: bool = False) -> None:
+        """End the conversation session, discarding the unflushed tail.
+
+        Audio since the last flush is dropped by design (press caps to flush
+        before ending if you want it); chunks already queued keep delivering
+        in order."""
+        with self._toggle_lock:
+            if not self._session_active:
+                return
+            self._session_active = False
+            self.recording = False
+            self.recorder.continuation_chunk = False
+            try:
+                self.recorder.stop()
+            except Exception:
+                self.logger.error("Error stopping recorder", exc_info=True)
+            self.recorder.auto_stopped = False
+            try:
+                if os.path.exists(self.recorder.filename):
+                    os.remove(self.recorder.filename)
+            except OSError:
+                self.logger.warning("Could not delete session tail", exc_info=True)
+            self.ui_feedback.set_recording_note('')
+            self._note_hold_until = 0.0
+            queue = self._chunk_queue
+            if auto_stopped:
+                # First chunk never made a sound; nothing was queued
+                if queue is not None:
+                    queue.cancel()
+                self.status_manager.set_status(
+                    AppStatus.ERROR,
+                    "⚠️ Recording stopped: No audio detected"
+                )
+                self.logger.warning("Session auto-stopped due to initial silence")
+                return
+            self.logger.info("Conversation session ended")
+            if queue is not None:
+                # PROCESSING first, then close(): if the queue is already empty
+                # the drained callback immediately corrects this to IDLE/ERROR
+                self.status_manager.set_status(AppStatus.PROCESSING)
+                queue.close()
+            else:
+                self.status_manager.set_status(AppStatus.IDLE)
+
+    def _make_chunk_queue(self, phone: bool) -> ChunkQueue:
+        """Build the ordered delivery queue for a conversation session.
+
+        Callbacks run on queue worker threads (outside the queue's state lock,
+        serialized in delivery order), so they only touch thread-safe app
+        surfaces and never call back into the queue (data arrives as
+        arguments)."""
+        queue_ref: list = []
+        # Transcript-limitations note for the LLM reading the paste, sent once
+        # per session ahead of whichever chunk is delivered first
+        preamble_pending = [bool(self.settings.get('session_preamble'))]
+
+        def build_preamble() -> str:
+            if phone:
+                you = self.settings.get('meeting_speaker_you') or 'Me'
+                them = self.settings.get('meeting_speaker_them') or 'Them'
+                if self.settings.get('phone_my_speaker_id'):
+                    speakers = (f"'{you}:' lines are me (matched by voice) and "
+                                f"'{them}:' is anyone else; in chunks with "
+                                "unlabeled lines the voice match failed, so each "
+                                "line is just one unattributed speaker turn")
+                elif self.settings.get('phone_speaker_labels'):
+                    speakers = ("Speaker turns are labeled 'Speaker N' per chunk, and "
+                                "labels can swap identities between chunks")
+                else:
+                    speakers = ("Each line is one speaker turn, but turns are "
+                                "unattributed — quietly infer who's speaking")
+            else:
+                you = self.settings.get('meeting_speaker_you') or 'Me'
+                them = self.settings.get('meeting_speaker_them') or 'Them'
+                speakers = (f"'{you}:' lines are me and '{them}:' is the other "
+                            "side, though attribution can err on overlapping speech")
+            return (
+                "[Transcript note: a live conversation transcribed by "
+                "voice-to-text, arriving in chunks as the call happens. "
+                f"{speakers}. Proper nouns and abbreviations are often "
+                "mistranscribed — quietly interpret them from context; you "
+                "don't need to surface these corrections to me.]"
+            )
+
+        def is_current() -> bool:
+            return queue_ref and queue_ref[0] is self._chunk_queue
+
+        def on_result(index: int, text: str, path: str) -> None:
+            prefix = ""
+            if preamble_pending[0]:
+                preamble_pending[0] = False
+                prefix = build_preamble() + "\n\n"
+            # Chunk headers mark discontinuities (mid-sentence cuts, and in
+            # labeled phone transcripts, where speaker labels reset)
+            header = f"--- [chunk {index}] ---\n" if phone else ""
+            self.history.add(text)
+            self.ui_feedback.insert_text(prefix + header + text + "\n",
+                                         output_mode=self.settings.get('output_mode'))
+            if self.update_icon_menu:
+                self.update_icon_menu()
+            self.logger.info(f"Chunk {index} delivered ({len(text)} chars)")
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        def on_retrying(index: int) -> None:
+            if self._session_active and is_current():
+                self._set_session_note(f"⚠️ chunk {index} retrying…", hold_s=6.0)
+            elif not self.recording:
+                self.ui_feedback.show_warning(f"⚠️ Chunk {index} failed, retrying…", 3000)
+
+        def on_failed(index: int, path: str) -> None:
+            # Keep the file and point the retry machinery at it (tray "Retry
+            # Last Transcription" copies the result to the clipboard) — unless
+            # a newer dictation is mid-processing, whose own retry candidate
+            # must not be clobbered
+            if not (self.processing_thread and self.processing_thread.is_alive()):
+                self.last_recording = path
+            if self._session_active and is_current():
+                self._set_session_note(f"⚠️ chunk {index} failed", hold_s=6.0)
+            elif not self.recording:
+                self.ui_feedback.show_warning(f"⚠️ Chunk {index} failed (retry from tray)", 5000)
+            else:
+                # A newer recording owns the indicator; the warning overlay
+                # would hide it when it auto-dismisses, so just log
+                self.logger.warning(f"Chunk {index} from an earlier session failed")
+
+        def on_pending(count: int) -> None:
+            if not (self._session_active and is_current()):
+                return
+            # A backlog of 1 is the normal state right after a flush; only
+            # surface it once chunks start stacking up
+            self._set_session_note(f"⏳ {count} queued" if count >= 2 else "")
+
+        def on_drained(failed_paths: list) -> None:
+            if not is_current() or self.recording:
+                return
+            if self.processing_thread and self.processing_thread.is_alive():
+                # A normal dictation is mid-pipeline; it owns the status and
+                # will set IDLE/ERROR itself when it finishes
+                return
+            if failed_paths:
+                self.last_recording = failed_paths[-1]
+                message = f"⚠️ {len(failed_paths)} chunk(s) failed"
+                self.ui_feedback.show_error_with_retry(message)
+                self.status_manager.set_status(AppStatus.ERROR, message)
+            elif (self.status_manager.current_status == AppStatus.PROCESSING or
+                  self.status_manager.current_status in RECORDING_STATUSES):
+                # Clear our own post-session PROCESSING state — including the
+                # case where the recording watchdog reasserted a stale
+                # "Recording" status in the instant the session ended (with
+                # self.recording False that status can only be stale). A newer
+                # dictation's transcribing/cleaning status is left alone.
+                self.status_manager.set_status(AppStatus.IDLE)
+
+        queue = ChunkQueue(
+            transcribe_fn=transcribe_audio,
+            on_result=on_result,
+            on_retrying=on_retrying,
+            on_failed=on_failed,
+            on_pending=on_pending,
+            on_drained=on_drained,
+        )
+        queue_ref.append(queue)
+        # Registry for sweep protection: prune queues that no longer hold any
+        # files (drained with no kept failures) rather than capping by count,
+        # so a slow-draining queue can't lose its files to a sweep
+        self._recent_queues = [q for q in self._recent_queues if q.active_paths()]
+        self._recent_queues.append(queue)
+        return queue
+
+    def _set_session_note(self, note: str, hold_s: float = 0.0) -> None:
+        """Show a note in the recording label; hold_s protects it from being
+        overwritten by routine pending-count updates for that long."""
+        now = time.monotonic()
+        if hold_s:
+            self._note_hold_until = now + hold_s
+        elif now < self._note_hold_until:
+            return
+        self.ui_feedback.set_recording_note(note)
 
     # Add this method to check recorder status periodically
-    def _check_recorder_status(self) -> None:
-        """Periodically check if recorder has auto-stopped and guard recording UI."""
-        if self.recording and (self.recorder.was_auto_stopped() or self.recorder.max_duration_reached):
-            threading.Thread(target=self._stop_recording, daemon=True).start()
+    def _check_recorder_status(self, token: int) -> None:
+        """Periodically check if recorder has auto-stopped and guard recording UI.
+
+        Runs on the Tk thread as a 100ms after() chain. The token ties the
+        chain to the recording that started it: a newer recording bumps the
+        token, so a stale pending callback exits instead of spawning a second
+        chain that could double-fire stop/flush actions."""
+        if token != self._watchdog_token:
             return
+
+        if self.recording and self.recorder.was_auto_stopped():
+            if self._session_active:
+                threading.Thread(target=self._end_session,
+                                 kwargs={'auto_stopped': True}, daemon=True).start()
+            else:
+                threading.Thread(target=self._stop_recording, daemon=True).start()
+            return
+
+        if self.recording and self.recorder.max_duration_reached:
+            if self._session_active:
+                # Roll into a new chunk instead of ending the session
+                self.recorder.max_duration_reached = False
+                self.logger.warning("Max chunk duration reached; auto-flushing")
+                threading.Thread(target=self._flush_chunk, daemon=True).start()
+            else:
+                threading.Thread(target=self._stop_recording, daemon=True).start()
+                return
 
         if self.recording:
             # Self-heal: if a stale processing thread overwrote our status, reassert it
-            if self.status_manager.current_status != AppStatus.RECORDING:
-                self.status_manager.set_status(AppStatus.RECORDING)
-            self.ui_feedback.root.after(100, self._check_recorder_status)
+            if self.status_manager.current_status != self._active_recording_status:
+                self.status_manager.set_status(self._active_recording_status)
+            self.ui_feedback.root.after(100, lambda: self._check_recorder_status(token))
 
-    def process_audio(self) -> None:
+    def process_audio(self, stream_session=None) -> None:
         try:
             self.cancel_flag.clear()
             gen = self._recording_generation
             self.processing_thread = threading.Thread(
-                target=self._process_audio_thread, args=(gen,))
+                target=self._process_audio_thread, args=(gen, stream_session))
             self.processing_thread.start()
         except Exception as e:
+            if stream_session is not None:
+                stream_session.abort()
             self.logger.error("Failed to start processing thread", exc_info=True)
             self.logger.debug(f"Thread state: {threading.current_thread().name}")
             self.ui_feedback.insert_text(f"Error: {str(e)[:50]}...")
@@ -358,16 +681,20 @@ class VoiceTypingApp:
         """Check if this processing run has been superseded by a newer recording."""
         return gen != self._recording_generation or self.cancel_flag.is_set()
 
-    def _process_audio_thread(self, gen: int) -> None:
+    def _process_audio_thread(self, gen: int, stream_session=None) -> None:
         try:
             self.logger.info("Starting audio processing")
             is_valid, reason = self.recorder.analyze_recording(self.last_recording)
 
             if self._is_stale(gen):
+                if stream_session is not None:
+                    stream_session.abort()
                 self.logger.info("Processing cancelled (stale generation).")
                 return
 
             if not is_valid:
+                if stream_session is not None:
+                    stream_session.abort()
                 if self._is_stale(gen):
                     return
                 self.logger.warning(f"Skipping transcription: {reason}")
@@ -377,8 +704,21 @@ class VoiceTypingApp:
                 )
                 return
 
+            # Streaming path: the realtime session already has the audio; just
+            # flush and collect. Any failure falls through to the batch upload.
+            streamed_text = None
+            if stream_session is not None:
+                try:
+                    if not self.cancel_flag.is_set():
+                        self.status_manager.set_status(AppStatus.TRANSCRIBING)
+                    streamed_text = stream_session.finish()
+                    self.logger.info(f"Streaming transcription ready ({len(streamed_text)} chars)")
+                except Exception as e:
+                    self.logger.warning(f"Streaming transcription failed, falling back to batch: {e}")
+                    stream_session.abort()
+
             self.logger.info("Starting transcription")
-            success, result = self._attempt_transcription()
+            success, result = self._attempt_transcription(streamed_text=streamed_text)
 
             if self._is_stale(gen):
                 self.logger.info("Processing cancelled (stale generation).")
@@ -420,11 +760,14 @@ class VoiceTypingApp:
                 self.ui_feedback.show_error_with_retry("⚠️ Transcription failed")
                 self.status_manager.set_status(AppStatus.ERROR, "⚠️ Error processing audio")
 
-    def _attempt_transcription(self, recording_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    def _attempt_transcription(self, recording_path: Optional[str] = None,
+                               streamed_text: Optional[str] = None) -> Tuple[bool, Optional[str]]:
         """Attempt transcription and return (success, result or error_type).
 
         Pass recording_path explicitly when the caller may run concurrently
-        with new recordings (retry), since self.last_recording is mutable."""
+        with new recordings (retry), since self.last_recording is mutable.
+        If streamed_text is provided (realtime streaming already transcribed
+        the recording), the batch upload is skipped but cleaning still runs."""
         try:
             path = recording_path or self.last_recording
             if not path:
@@ -435,12 +778,14 @@ class VoiceTypingApp:
             # so a cancel can't be overwritten by a stale pulsing status)
             if not self.cancel_flag.is_set():
                 self.status_manager.set_status(AppStatus.TRANSCRIBING)
-            text = transcribe_audio(path)
+            text = streamed_text if streamed_text else transcribe_audio(path)
 
             if self.cancel_flag.is_set():
                 return False, "cancelled"
 
-            if self.clean_transcription_enabled:
+            # Meeting/phone transcripts are speaker-labeled; LLM cleaning would
+            # mangle the labels, so skip it for those recordings
+            if self.clean_transcription_enabled and not is_conversation_recording(path):
                 try:
                     # Update status to show we're cleaning
                     if not self.cancel_flag.is_set():
@@ -501,6 +846,96 @@ class VoiceTypingApp:
         status = 'enabled' if self.clean_transcription_enabled else 'disabled'
         self.logger.info(f"Clean transcription {status}")
 
+    def toggle_meeting_mode(self) -> None:
+        """Toggle meeting mode (mic + system audio with speaker-labeled transcripts).
+
+        Runs under the toggle lock so a caps press can't start a session in the
+        gap between ending the current one and flipping the setting."""
+        with self._toggle_lock:
+            if self._session_active:
+                self._end_session()
+            enabling = not self.settings.get('meeting_mode')
+
+            if enabling:
+                if not os.environ.get('ELEVENLABS_API_KEY'):
+                    self.ui_feedback.show_warning(
+                        "⚠️ Meeting mode needs ELEVENLABS_API_KEY in .env", 5000)
+                    self.logger.warning("Meeting mode not enabled: ELEVENLABS_API_KEY missing")
+                    return
+                # Meeting and phone mode are mutually exclusive capture strategies
+                if self.settings.get('phone_mode'):
+                    self.settings.set('phone_mode', False)
+                    self.logger.info("Phone mode disabled (meeting mode enabled)")
+                from modules.loopback_recorder import loopback_available
+                available, detail = loopback_available()
+                if available:
+                    self.ui_feedback.show_warning(f"🎧 Meeting mode on ({detail})", 3000)
+                else:
+                    # Allow enabling anyway: capture falls back to mic-only per
+                    # recording, and the output device may change before next use
+                    self.ui_feedback.show_warning(
+                        "⚠️ Meeting mode on, but system audio capture unavailable", 5000)
+                    self.logger.warning(f"Loopback unavailable at toggle time: {detail}")
+            else:
+                self.ui_feedback.show_warning("🎧 Meeting mode off", 2000)
+
+            self.settings.set('meeting_mode', enabling)
+            self.logger.info(f"Meeting mode {'enabled' if enabling else 'disabled'}")
+        if self.update_icon_menu:
+            self.update_icon_menu()
+
+    def toggle_phone_mode(self) -> None:
+        """Toggle phone mode (mic-only conversation with diarized transcripts).
+
+        For conversations happening in the room — a call on speakerphone, an
+        in-person chat — where all voices reach the microphone. Speakers are
+        separated by voice diarization instead of by channel.
+        """
+        with self._toggle_lock:
+            if self._session_active:
+                self._end_session()
+            enabling = not self.settings.get('phone_mode')
+
+            if enabling:
+                if not os.environ.get('ELEVENLABS_API_KEY'):
+                    self.ui_feedback.show_warning(
+                        "⚠️ Phone mode needs ELEVENLABS_API_KEY in .env", 5000)
+                    self.logger.warning("Phone mode not enabled: ELEVENLABS_API_KEY missing")
+                    return
+                # Meeting and phone mode are mutually exclusive capture strategies
+                if self.settings.get('meeting_mode'):
+                    self.settings.set('meeting_mode', False)
+                    self.logger.info("Meeting mode disabled (phone mode enabled)")
+                self.ui_feedback.show_warning("📞 Phone mode on (diarized transcripts)", 3000)
+            else:
+                self.ui_feedback.show_warning("📞 Phone mode off", 2000)
+
+            self.settings.set('phone_mode', enabling)
+            self.logger.info(f"Phone mode {'enabled' if enabling else 'disabled'}")
+        if self.update_icon_menu:
+            self.update_icon_menu()
+
+    def toggle_streaming_dictation(self) -> None:
+        """Toggle streaming dictation (beta): transcribe over a realtime
+        websocket while recording, so text is ready ~immediately on stop.
+        Applies to normal dictation only; falls back to batch on any failure."""
+        enabling = not self.settings.get('streaming_dictation')
+
+        if enabling:
+            if not os.environ.get('OPENAI_API_KEY'):
+                self.ui_feedback.show_warning(
+                    "⚠️ Streaming dictation needs OPENAI_API_KEY in .env", 5000)
+                self.logger.warning("Streaming dictation not enabled: OPENAI_API_KEY missing")
+                return
+            self.ui_feedback.show_warning("⚡ Streaming dictation on (beta)", 3000)
+        else:
+            self.ui_feedback.show_warning("⚡ Streaming dictation off", 2000)
+
+        self.settings.set('streaming_dictation', enabling)
+        self.logger.info(f"Streaming dictation {'enabled' if enabling else 'disabled'}")
+        if self.update_icon_menu:
+            self.update_icon_menu()
+
     def run(self) -> None:
         # Start keyboard listener
         self.listener.start()
@@ -523,14 +958,23 @@ class VoiceTypingApp:
     def handle_ui_click(self) -> None:
         """Handle clicks on the UI feedback window."""
         status = self.status_manager.current_status
-        if status == AppStatus.RECORDING:
-            self.logger.info("Canceling recording...")
-            threading.Thread(target=self._cancel_recording, daemon=True).start()
-            self.status_manager.set_status(AppStatus.IDLE)
+        if status in RECORDING_STATUSES:
+            if self._session_active:
+                self.logger.info("Ending conversation session (indicator click)...")
+                threading.Thread(target=self._end_session, daemon=True).start()
+            else:
+                self.logger.info("Canceling recording...")
+                threading.Thread(target=self._cancel_recording, daemon=True).start()
+                self.status_manager.set_status(AppStatus.IDLE)
         elif status in (AppStatus.PROCESSING, AppStatus.TRANSCRIBING, AppStatus.CLEANING):
             self.logger.info("Canceling processing...")
             if self.processing_thread and self.processing_thread.is_alive():
                 self.cancel_flag.set()
+            elif self._chunk_queue is not None:
+                # Only when no dictation is processing is the visible activity
+                # the session queue's post-end drain; cancelling the dictation
+                # must not silently discard delivered-in-order session chunks
+                self._chunk_queue.cancel()
             # The processing thread exits silently once it notices the flag;
             # reset the UI here so it can't be left stuck on a pulsing status
             self.status_manager.set_status(AppStatus.IDLE)
@@ -539,10 +983,31 @@ class VoiceTypingApp:
         """Stop and discard the current recording, serialized against hotkey toggles."""
         with self._toggle_lock:
             self.recording = False
+            if self._streaming_session is not None:
+                self._streaming_session.abort()
+                self._streaming_session = None
             try:
                 self.recorder.stop()
             except Exception:
                 self.logger.error("Error stopping recorder", exc_info=True)
+
+    def _start_streaming_session(self):
+        """Open a realtime transcription session, or None if unavailable.
+
+        Failure is non-fatal: recording proceeds normally and transcription
+        happens via the regular batch upload on stop."""
+        try:
+            from services.openai_realtime_stt import RealtimeDictationSession
+            model = self.settings.get('openai_stt_model') or 'gpt-4o-transcribe'
+            if not str(model).startswith('gpt-4o'):
+                model = 'gpt-4o-transcribe'  # realtime doesn't support whisper-1
+            language = self.settings.get('stt_language') or 'en'
+            session = RealtimeDictationSession(model=model, language=language)
+            session.start()
+            return session
+        except Exception as e:
+            self.logger.warning(f"Streaming session unavailable, using batch: {e}")
+            return None
 
     def toggle_favorite_microphone(self, device_id: int) -> None:
         """Toggle favorite status for a microphone device"""

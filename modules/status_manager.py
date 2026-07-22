@@ -5,10 +5,20 @@ from typing import Optional, Dict, Any, Callable
 class AppStatus(Enum):
     IDLE = auto()
     RECORDING = auto()
+    RECORDING_MEETING = auto()
+    RECORDING_PHONE = auto()
     PROCESSING = auto()
     TRANSCRIBING = auto()
     CLEANING = auto()
     ERROR = auto()
+
+# All statuses that mean "a recording is in progress" (checked by cancel-click
+# handling and the recording watchdog, which must not care about the mode)
+RECORDING_STATUSES = frozenset({
+    AppStatus.RECORDING,
+    AppStatus.RECORDING_MEETING,
+    AppStatus.RECORDING_PHONE,
+})
 
 @dataclass
 class StatusConfig:
@@ -36,6 +46,25 @@ class StatusManager:
             ui_color='#FF0000',
             ui_text="🎤 Recording (click to cancel)",
             tooltip_text="Recording in progress",
+            pulse=True
+        ),
+        # Mode-specific recording colors stay in the warm/"live" family so they
+        # still read as recording, but are visibly not the plain-red default
+        # (and don't collide with the blue/indigo/teal/orange statuses).
+        AppStatus.RECORDING_MEETING: StatusConfig(
+            tray_icon="🎧",
+            tray_icon_file='assets/microphone-red.png',
+            ui_color='#D81B60',  # Crimson-pink
+            ui_text="🎧 Recording meeting (caps=send · click=end)",
+            tooltip_text="Recording meeting (mic + system audio)",
+            pulse=True
+        ),
+        AppStatus.RECORDING_PHONE: StatusConfig(
+            tray_icon="📞",
+            tray_icon_file='assets/microphone-red.png',
+            ui_color='#8E24AA',  # Violet
+            ui_text="📞 Recording call (caps=send · click=end)",
+            tooltip_text="Recording call (diarized transcript)",
             pulse=True
         ),
         AppStatus.PROCESSING: StatusConfig(

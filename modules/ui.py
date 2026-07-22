@@ -95,6 +95,7 @@ class UIFeedback:
         self._timer_after_id: Optional[str] = None
         self._recording_started: Optional[float] = None
         self._recording_base_text: str = ''
+        self._recording_note: str = ''
         self.root.after(UI_QUEUE_POLL_MS, self._process_ui_queue)
 
     def _process_ui_queue(self) -> None:
@@ -315,9 +316,10 @@ class UIFeedback:
                 level_canvas.configure(height=self.level_height)
                 level_canvas.pack_configure(padx=self.level_padx, pady=self.level_pady)
 
-                # Update label text based on current status
+                # Update label text based on current status (any recording mode;
+                # the elapsed-time ticker restores mode-specific text within 1s)
                 current_text = label.cget('text')
-                if '🎤 Recording' in current_text:
+                if 'Recording' in current_text:
                     label.configure(text=self.label_text)
 
             # Reposition windows with new size
@@ -412,6 +414,16 @@ class UIFeedback:
         """Set the function to be called when retry is clicked"""
         self.on_retry_callback = callback
 
+    def set_recording_note(self, note: str) -> None:
+        """Short status note appended to the recording label (e.g. queued-chunk
+        count or a chunk failure during a conversation session); pass '' to
+        clear. Thread-safe; the label refreshes on the next elapsed-time tick
+        (≤1s). The warning overlay can't be used here: while recording, the
+        pulse animation and the elapsed-time ticker would overwrite it."""
+        def impl() -> None:
+            self._recording_note = note
+        self._call_on_ui_thread(impl)
+
     def insert_text(self, text: str, output_mode: str = 'standard') -> None:
         """Insert text at the current cursor position using the configured output provider.
         Thread-safe: runs on the Tk main thread (providers use root.after and the clipboard)."""
@@ -496,6 +508,14 @@ class UIFeedback:
         """Reset UI state and hide all indicators"""
         self.warning_timer = None
         self.retry_available = False
+        if self.pulsing:
+            # A pulsing status (recording/processing) is live — e.g. a warning
+            # fired around a recording start. Restore the level bar but keep
+            # the windows visible; the pulse chain and elapsed-time ticker
+            # repaint colors and text within a second.
+            for level_canvas in self.level_canvases:
+                level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
+            return
         for indicator, frame, label, level_canvas in zip(
             self.indicators, self.frames, self.labels, self.level_canvases
         ):
@@ -517,9 +537,10 @@ class UIFeedback:
         # Update colors and text
         text = error_message if error_message else config.ui_text
 
-        # Override text for recording status in mini mode
-        if self.size == 'mini' and config.ui_text == "🎤 Recording (click to cancel)":
-            text = "🎤 Recording"
+        # Shorten recording status text in mini mode (all recording modes)
+        if self.size == 'mini':
+            text = text.replace(" (click to cancel)", "")
+            text = text.replace(" (caps=send · click=end)", "")
 
         for indicator, frame, label in zip(self.indicators, self.frames, self.labels):
             indicator.configure(bg=config.ui_color)
@@ -540,15 +561,19 @@ class UIFeedback:
                     level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
             self.retry_available = False
             self.pulse_colors = [config.ui_color, self._darken_color(config.ui_color)]
+            # Tint the level bar background to match the status color
+            for level_canvas in self.level_canvases:
+                level_canvas.configure(bg=self._darken_color(config.ui_color))
             self._show_on_top()
             self._start_pulse()
             self._schedule_snap()
 
-            # Elapsed-time display while recording
-            if config.ui_text.startswith("🎤 Recording"):
+            # Elapsed-time display while recording (any recording mode)
+            if "Recording" in config.ui_text:
                 self._recording_base_text = text
                 if self._recording_started is None:
                     self._recording_started = time.monotonic()
+                    self._recording_note = ''
                     self._start_recording_timer()
             else:
                 self._recording_started = None
@@ -576,9 +601,10 @@ class UIFeedback:
             return
         elapsed = int(time.monotonic() - self._recording_started)
         minutes, seconds = divmod(elapsed, 60)
+        note = f"  {self._recording_note}" if self._recording_note else ""
         try:
             for label in self.labels:
-                label.configure(text=f"{self._recording_base_text}  {minutes}:{seconds:02d}")
+                label.configure(text=f"{self._recording_base_text}{note}  {minutes}:{seconds:02d}")
         except tk.TclError:
             return
         # Text width changes as the timer advances; re-fit the window once

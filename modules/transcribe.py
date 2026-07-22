@@ -62,6 +62,77 @@ def _get_transcriber(provider_name: str):
         raise ValueError(f"Unknown STT provider: {provider_name}")
 
 
+def is_multichannel_recording(filename: str) -> bool:
+    """True if the file is a 2-channel meeting-mode recording.
+
+    Normal dictation recordings are always mono, so channel count is a
+    reliable marker that survives snapshots, retries, and app restarts.
+    """
+    try:
+        import soundfile as sf
+        return sf.info(filename).channels >= 2
+    except Exception:
+        return False
+
+
+def is_phone_recording(filename: str) -> bool:
+    """True if the file is a phone-mode recording (mono, multiple speakers).
+
+    Phone recordings are plain mono mic audio, so the recorder tags them with
+    a WAV comment — a marker that, like channel count, survives snapshots,
+    retries, and app restarts.
+    """
+    try:
+        import soundfile as sf
+        from modules.recorder import PHONE_RECORDING_COMMENT
+        with sf.SoundFile(filename) as f:
+            return (f.comment or '').startswith(PHONE_RECORDING_COMMENT)
+    except Exception:
+        return False
+
+
+def is_conversation_recording(filename: str) -> bool:
+    """True for any multi-speaker recording (meeting or phone mode).
+
+    These produce speaker-labeled transcripts, so callers use this to skip
+    steps that would mangle the labels (e.g. LLM cleaning).
+    """
+    return is_multichannel_recording(filename) or is_phone_recording(filename)
+
+
+def _get_meeting_transcriber():
+    """Get the ElevenLabs multichannel transcriber for meeting recordings (cached)."""
+    you_label = settings.get('meeting_speaker_you') or 'Me'
+    them_label = settings.get('meeting_speaker_them') or 'Them'
+    key = ('elevenlabs_meeting', you_label, them_label)
+    if key not in _transcriber_cache:
+        from services.elevenlabs_stt import ElevenLabsMeetingTranscriber
+        _transcriber_cache[key] = ElevenLabsMeetingTranscriber(
+            you_label=you_label, them_label=them_label)
+    return _transcriber_cache[key]
+
+
+def _get_phone_transcriber():
+    """Get the ElevenLabs diarizing transcriber for phone recordings (cached)."""
+    num_speakers = settings.get('phone_num_speakers')
+    labeled = bool(settings.get('phone_speaker_labels'))
+    my_speaker_id = settings.get('phone_my_speaker_id')
+    you_label = settings.get('meeting_speaker_you') or 'Me'
+    them_label = settings.get('meeting_speaker_them') or 'Them'
+    use_library = bool(settings.get('use_speaker_library'))
+    threshold = settings.get('phone_diarization_threshold')
+    key = ('elevenlabs_phone', num_speakers, labeled, my_speaker_id,
+           you_label, them_label, use_library, threshold)
+    if key not in _transcriber_cache:
+        from services.elevenlabs_stt import ElevenLabsDiarizedTranscriber
+        _transcriber_cache[key] = ElevenLabsDiarizedTranscriber(
+            num_speakers=num_speakers, labeled=labeled,
+            my_speaker_id=my_speaker_id, you_label=you_label,
+            them_label=them_label, use_speaker_library=use_library,
+            diarization_threshold=threshold)
+    return _transcriber_cache[key]
+
+
 def transcribe_audio(filename: str, language: Optional[str] = None) -> str:
     """
     Transcribe audio using the configured provider
@@ -79,6 +150,18 @@ def transcribe_audio(filename: str, language: Optional[str] = None) -> str:
     Raises:
         Exception: If transcription fails
     """
+    # Meeting-mode recordings (2-channel: mic + system audio) always route to
+    # ElevenLabs Scribe multichannel, which attributes speakers by channel.
+    if is_multichannel_recording(filename):
+        logger.info("Meeting recording detected; using ElevenLabs Scribe multichannel")
+        return _get_meeting_transcriber().transcribe(filename)
+
+    # Phone-mode recordings (mono, multiple speakers on one mic) route to
+    # ElevenLabs Scribe with voice diarization for speaker attribution.
+    if is_phone_recording(filename):
+        logger.info("Phone recording detected; using ElevenLabs Scribe diarization")
+        return _get_phone_transcriber().transcribe(filename)
+
     provider = settings.get('stt_provider') or 'openai'
 
     # Get language from parameter or settings

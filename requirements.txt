@@ -5,6 +5,8 @@ python-dotenv==1.2.2  # Environment variables
 pynput==1.7.6  # Keyboard shortcuts
 sounddevice==0.5.1  # Audio recording
 soundfile==0.12.1  # Audio file handling
+soundcard==0.4.6  # System-audio (WASAPI loopback) capture for meeting mode
+websocket-client==1.9.0  # OpenAI Realtime websocket for streaming dictation
 
 # AI
 litellm==1.84.0 # model routing

@@ -46,6 +46,46 @@ class Settings:
             'custom_stt_base_url': 'http://localhost:8000',
             'custom_stt_model': 'parakeet-tdt-0.6b-v2',
 
+            # Streaming dictation (beta): transcribe over an OpenAI Realtime
+            # websocket while recording, so text is ready ~immediately on stop.
+            # Normal dictation mode only; batch upload remains the fallback.
+            'streaming_dictation': False,
+
+            # Meeting mode: record mic + system audio, transcribe with speaker
+            # labels via ElevenLabs Scribe (requires ELEVENLABS_API_KEY in .env)
+            'meeting_mode': False,
+            'meeting_speaker_you': 'Me',    # Label for your mic channel
+            'meeting_speaker_them': 'Them',  # Label for the system-audio channel
+
+            # Phone mode: mic-only recording of an in-room conversation (e.g. a
+            # call on speakerphone), transcribed with voice diarization via
+            # ElevenLabs Scribe (requires ELEVENLABS_API_KEY in .env)
+            'phone_mode': False,
+            'phone_num_speakers': 2,  # Max speakers hint for diarization; null to let Scribe decide
+            # 'Speaker N' labels are assigned per chunk and can swap identities
+            # between chunks of a session, so they're off by default: output is
+            # one unattributed line per speaker turn
+            'phone_speaker_labels': False,
+            # Match diarized voices against the ElevenLabs workspace speaker
+            # library (dashboard: Speech to Text -> Speakers). Harmless no-op
+            # if the library is empty.
+            'use_speaker_library': True,
+            # Your registered Speaker ID in that library (e.g. 'jane-doe').
+            # When set and voice-matched, your turns are labeled with
+            # meeting_speaker_you and everyone else with meeting_speaker_them,
+            # stable across session chunks.
+            'phone_my_speaker_id': None,
+            # Diarization threshold (0.1-0.4); when set it replaces the
+            # phone_num_speakers hint (the API allows only one). Also gates
+            # speaker-library match acceptance: a 2026-07-22 sweep showed the
+            # enrolled speaker only matched at >=0.26 (~98% word accuracy,
+            # stable through 0.4) while the default ~0.22 rejected the match.
+            # Set null to use phone_num_speakers instead.
+            'phone_diarization_threshold': 0.3,
+            # Prepend a short transcript-limitations note (for the LLM reading
+            # it) to the first chunk delivered in a meeting/phone session
+            'session_preamble': True,
+
             'clean_transcription': False,
             'cleaning_timeout': 10.0,  # Timeout for LLM cleaning in seconds
             'llm_model': "openai/gpt-4o-mini",

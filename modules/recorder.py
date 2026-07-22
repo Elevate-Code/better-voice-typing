@@ -22,6 +22,11 @@ settings = Settings()
 
 # Minimum duration in seconds for valid recordings
 MIN_DURATION = 1.0
+
+# WAV comment written into phone-mode recordings so the transcription pipeline
+# can recognize them later (survives snapshots, retries, and app restarts —
+# the mono audio itself is indistinguishable from normal dictation).
+PHONE_RECORDING_COMMENT = 'voice_typing:phone'
 # Time of continuous silence (in seconds) before auto-stopping
 DEFAULT_SILENT_START_TIMEOUT = 4.0
 
@@ -57,6 +62,30 @@ class AudioRecorder:
         self.recording_start_time: Optional[float] = None
         self.initial_sound_detected = False  # Track if we've detected any sound
 
+        # Recording sample rate. Normally 22050; the app sets 24000 for
+        # streamed dictation so chunks match the Realtime API without
+        # resampling. Set before start(); applies to the whole recording.
+        self.samplerate = 22050
+        # Optional per-recording sink for live audio chunks (streaming
+        # transcription). Called from the audio callback thread with a copy
+        # of each block; must be cheap and never raise.
+        self.stream_callback: Optional[Callable[[np.ndarray], None]] = None
+
+        # Meeting mode: capture system audio (loopback) alongside the mic and
+        # compose a 2-channel file (ch0 = mic, ch1 = system) on stop.
+        # Set by the app before start(); read once per recording.
+        self.meeting_mode = False
+        # Phone mode: mic-only recording of an in-room conversation (e.g. a
+        # phone call on speaker); the WAV is tagged so transcription routes
+        # to voice diarization. Set by the app before start().
+        self.phone_mode = False
+        # Continuous conversation sessions set this for every chunk after the
+        # first: the user may listen silently for long stretches, so the
+        # silent-start check must not cancel a continuation chunk.
+        self.continuation_chunk = False
+        self._loopback = None  # LoopbackRecorder instance while recording
+        self._mic_first_block_time: Optional[float] = None
+
     def _calculate_level(self, indata: np.ndarray) -> float:
         """Calculate audio level from input data"""
         rms = np.sqrt(np.mean(np.square(indata)))
@@ -66,8 +95,12 @@ class AudioRecorder:
         normalized = (db + 60) / 60
         current_level = max(0.0, min(1.0, normalized))
 
-        # Only check for silence at the start of the recording, before any sound is detected.
+        # Only check for silence at the start of the recording, before any sound
+        # is detected. Skipped in meeting mode: the far side may be talking while
+        # the user's mic is silent, so a quiet mic must not cancel the recording.
         if (self.silent_start_timeout is not None and
+            not self.meeting_mode and
+            not self.continuation_chunk and
             self.recording_start_time is not None and
             not self.initial_sound_detected):
 
@@ -129,6 +162,9 @@ class AudioRecorder:
             if status:
                 logger.warning(f'Audio callback status: {status}')
 
+            if self._mic_first_block_time is None:
+                self._mic_first_block_time = time.time()
+
             with self._lock:
                 if not self.recording or self.file is None:
                     return
@@ -160,13 +196,21 @@ class AudioRecorder:
                         self.recording = False
                         raise sd.CallbackStop()
 
+                    if self.stream_callback is not None:
+                        try:
+                            self.stream_callback(indata.copy())
+                        except Exception:
+                            pass  # streaming is best-effort; file is the source of truth
+
         try:
             with sf.SoundFile(self.filename, mode='w',
-                            samplerate=22050,
+                            samplerate=self.samplerate,
                             channels=1,
                             subtype='PCM_16',
                             format='WAV') as self.file:
-                with sd.InputStream(samplerate=22050,
+                if self.phone_mode:
+                    self.file.comment = PHONE_RECORDING_COMMENT
+                with sd.InputStream(samplerate=self.samplerate,
                                   channels=1,
                                   callback=audio_callback) as self.stream:
                     while self.recording:
@@ -196,6 +240,16 @@ class AudioRecorder:
         self.max_duration = settings.get('max_recording_duration')
         self.silence_start = None
         self.initial_sound_detected = False
+        self._mic_first_block_time = None
+        self._loopback = None
+        if self.meeting_mode:
+            try:
+                from modules.loopback_recorder import LoopbackRecorder
+                self._loopback = LoopbackRecorder(samplerate=self.samplerate)
+                self._loopback.start()
+            except Exception as e:
+                logger.error(f"Could not start loopback capture, falling back to mic-only: {e}")
+                self._loopback = None
         self.recording_start_time = time.time()
         self.recording = True
         self.thread = threading.Thread(target=self._record)
@@ -225,6 +279,53 @@ class AudioRecorder:
                         except:
                             pass
                         self.file = None
+
+        if self._loopback is not None:
+            loopback = self._loopback
+            self._loopback = None
+            try:
+                loopback.stop()
+                self._compose_meeting_file(loopback)
+            except Exception:
+                logger.error("Failed to compose meeting recording; keeping mic-only audio",
+                             exc_info=True)
+
+    def _compose_meeting_file(self, loopback) -> None:
+        """Overwrite the mic recording with a 2-channel file (ch0=mic, ch1=system).
+
+        The two streams start at slightly different wall-clock times; the later
+        starter is padded at its head so the timelines line up. If loopback
+        capture produced nothing, the mono mic file is left untouched (the
+        normal transcription path then applies).
+        """
+        import os
+        loop_audio = loopback.audio()
+        if loop_audio.size == 0 or not os.path.exists(self.filename):
+            if loopback.error is not None:
+                logger.warning(f"No system audio captured ({loopback.error}); mic-only recording kept")
+            return
+
+        mic_audio, samplerate = sf.read(self.filename, dtype='float32')
+        if mic_audio.ndim > 1:
+            mic_audio = mic_audio.mean(axis=1)
+
+        if self._mic_first_block_time and loopback.first_block_time:
+            offset = loopback.first_block_time - self._mic_first_block_time
+            pad = int(abs(offset) * samplerate)
+            if pad:
+                zeros = np.zeros(pad, dtype=np.float32)
+                if offset > 0:
+                    loop_audio = np.concatenate([zeros, loop_audio])
+                else:
+                    mic_audio = np.concatenate([zeros, mic_audio])
+
+        length = max(len(mic_audio), len(loop_audio))
+        mic_audio = np.pad(mic_audio, (0, length - len(mic_audio)))
+        loop_audio = np.pad(loop_audio, (0, length - len(loop_audio)))
+
+        sf.write(self.filename, np.stack([mic_audio, loop_audio], axis=1),
+                 samplerate, subtype='PCM_16', format='WAV')
+        logger.info(f"Composed 2-channel meeting recording ({length / samplerate:.1f}s)")
 
     def was_auto_stopped(self) -> bool:
         """Check if recording was automatically stopped due to silence"""

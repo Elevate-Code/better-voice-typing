@@ -29,12 +29,58 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
 - The recording indicator shows elapsed recording time, and recordings auto-stop (and still transcribe) at a configurable maximum duration
 - Only one instance of the app can run at a time; launching it again shows a notice instead of a second conflicting instance
 
+### Meeting Mode
+
+Toggle **🎧 Meeting Mode** in the tray menu to capture *both sides of a call*: recordings include your microphone plus system audio (whatever you hear — Meet/Zoom/Teams participants, videos, etc.) as separate channels. Transcripts come back speaker-labeled:
+
+```
+Me: So walk me through the pricing concern again?
+Them: Well, mainly it's the onboarding fee that feels steep...
+```
+
+- Attribution is by audio channel (your mic is always "Me"), not voice-guessing, so it's reliable even with similar voices. Multiple remote speakers share the "Them" label.
+- Requires an [ElevenLabs](https://elevenlabs.io) API key: add `ELEVENLABS_API_KEY="..."` to your `.env` (transcription uses Scribe v2 multichannel).
+- Labels are configurable via `meeting_speaker_you` / `meeting_speaker_them` in `settings.json`.
+- Recording runs as a **continuous session**: the first Caps Lock press starts it, and each following press *sends* everything captured since the last send for transcription while recording keeps rolling — so you can pull the conversation so far into a chat mid-call without losing what's said next. Click the recording indicator (or toggle the mode off) to end the session; audio since your last send is discarded, so press Caps Lock first if you want it.
+- Sent chunks transcribe in the background and are inserted at your cursor strictly in order. A failed chunk retries once automatically; if it still fails it's kept for **Retry Last Transcription** in the tray, and the session carries on.
+- The first chunk of each session is prefixed with a short bracketed transcript note addressed to whoever reads the paste (typically an AI assistant): voice-to-text mangles proper nouns and attribution, so interpret quietly from context. Disable via `session_preamble: false` in `settings.json`.
+- If system-audio capture fails, the recording falls back to normal mic-only dictation.
+- The recording indicator turns crimson-pink (instead of red) so you can tell meeting mode is active at a glance.
+- Tip: wear headphones; if your mic can hear your speakers, faint echoes of the other side may appear on your channel.
+
+### Phone Mode
+
+Toggle **📞 Phone Mode** in the tray menu for conversations happening *in the room* — a phone call on speaker, an in-person chat — where every voice reaches your microphone. Recording is mic-only (no system audio), and speaker turns are separated by voice diarization onto their own lines:
+
+```
+So walk me through the pricing concern again?
+Well, mainly it's the onboarding fee that feels steep...
+```
+
+- Turns are deliberately *unlabeled* by default: diarization can't know which voice is yours, and its generic "Speaker N" labels are assigned per chunk, so they can swap identities mid-session. Set `phone_speaker_labels: true` in `settings.json` if you want the labels anyway.
+- **Stable "Me:" / "Them:" labels via voice matching**: enroll your voice in ElevenLabs' workspace speaker library (dashboard → Speech to Text → Speakers → Add speaker, with 10–60s of your solo audio), then set `phone_my_speaker_id` in `settings.json` to your registered Speaker ID. Words matched to your voice come back with that ID instead of `speaker_N`, so your turns are labeled "Me:" and everyone else "Them:" — consistently across every chunk. Verified at ~98% word accuracy on a 4-speaker meeting recording.
+- `phone_diarization_threshold` (default `0.3`) replaces the `phone_num_speakers` hint when set (the API accepts only one). Beyond clustering, it empirically gates speaker-library match *acceptance*: in a seeded sweep the enrolled speaker only matched at ≥ 0.26 (stable through 0.4), while the API's default (~0.22) rejected the match. Set it to `null` to fall back to the `phone_num_speakers` hint (which disables the tuned matching).
+- Same continuous-session behavior as Meeting Mode (including the first-chunk transcript note): Caps Lock sends a chunk and keeps recording; click the indicator to end. Each chunk is prefixed with a `--- [chunk N] ---` header marking the discontinuity.
+- Requires an [ElevenLabs](https://elevenlabs.io) API key, same as Meeting Mode.
+- `phone_num_speakers` in `settings.json` (default `2`) hints the expected speaker count; set it higher for group conversations or `null` to let Scribe decide.
+- Meeting Mode and Phone Mode are mutually exclusive — enabling one turns the other off.
+- The recording indicator turns violet (instead of red) so you can tell phone mode is active at a glance.
+
+### Streaming Dictation (Beta)
+
+Toggle **Streaming Dictation** under Settings to transcribe *while you speak* over an OpenAI Realtime websocket: text is ready ~1–3 seconds after you stop, regardless of how long the recording was (normally the wait grows with clip length).
+
+- Normal dictation mode only — Meeting and Phone modes keep their batch pipelines (their multi-speaker transcription isn't available in realtime APIs).
+- Realtime models trade a little accuracy for speed: each speech segment is transcribed as you go, without the full-recording context the batch model gets. Hence the Beta label — turn it off if you notice quality dips.
+- Fail-safe by design: the audio file is still recorded in parallel, and any streaming failure (connection, mid-recording drop, quota) falls back to the normal batch upload automatically.
+
 ### Tray Options/Settings
 - Retry Last Transcription: Attempts to re-process the last audio recording, useful if the first attempt failed or was inaccurate.
 - Recent Transcriptions: Access previous transcriptions, copy to clipboard.
 - Microphone Selection: Choose your preferred input device.
 - Settings:
   - Clean Transcription: Enable/disable further refinement of the transcription using a configurable LLM.
+  - Streaming Dictation (Beta): Transcribe while recording for near-instant results (see above).
   - Silent-Start Timeout: Cancels the recording if no sound is detected within the first few seconds, preventing accidental recordings.
   - Recording Indicator: Customize size, position, and multi-monitor display of the recording indicator.
   - Speech-to-Text: Select your STT provider (OpenAI, Custom/Local) and model (Whisper, GPT-4o, GPT-4o Mini, or custom).
