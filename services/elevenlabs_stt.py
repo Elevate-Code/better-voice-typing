@@ -1,8 +1,10 @@
-"""ElevenLabs Scribe Speech-to-Text service for conversation recordings.
+"""ElevenLabs Scribe Speech-to-Text service.
 
-Two transcribers share the request/formatting machinery and differ only in
+Three transcribers share the request/formatting machinery and differ only in
 how words are attributed to speakers:
 
+- ElevenLabsDictationTranscriber: mono single-speaker dictation. No
+  attribution; returns the flat transcript text.
 - ElevenLabsMeetingTranscriber: 2-channel recordings (ch0 = user's mic,
   ch1 = system loopback) via Scribe v2 multichannel mode. Attribution comes
   from the channel itself, so "you" vs "them" is always correct.
@@ -52,6 +54,9 @@ class _ScribeTranscriberBase:
         self.api_key = api_key
         self.timeout = timeout
         self.model = "scribe_v2"
+        # ISO-639-1 or ISO-639-3 code; the API accepts either. Conversation
+        # transcribers keep 'eng'; dictation follows the stt_language setting.
+        self.language_code = "eng"
         self.session = requests.Session()
         # When False, utterances keep their one-line-per-turn structure but
         # drop the "Name: " prefix (used when labels would be unreliable)
@@ -83,7 +88,7 @@ class _ScribeTranscriberBase:
             files={"file": (buffer.name, buffer, "audio/flac")},
             data={
                 "model_id": self.model,
-                "language_code": "eng",
+                "language_code": self.language_code,
                 "tag_audio_events": "false",
                 "no_verbatim": "true",
                 **self._request_data(),
@@ -143,6 +148,31 @@ class _ScribeTranscriberBase:
         return "\n".join(lines)
 
 
+class ElevenLabsDictationTranscriber(_ScribeTranscriberBase):
+    """Plain dictation transcriber: mono, single speaker, no attribution.
+
+    Returns the flat transcript text. Inherits no_verbatim=true from the
+    base request, so filler words ("um", "uh") are cleaned by the model —
+    benchmarked (st-vtt-bench, 2026-07-31) at 12.25% WER on dictation-style
+    speech vs 17.07% for gpt-4o-transcribe.
+    """
+
+    def __init__(self, language: str = 'en', timeout: float = 120.0):
+        super().__init__(timeout=timeout)
+        self.language_code = language or 'en'
+
+    def update_language(self, language: str) -> None:
+        """Change the transcription language (ISO-639-1 code, e.g. 'en')."""
+        if language:
+            self.language_code = language
+
+    def _request_data(self) -> dict:
+        return {"diarize": "false"}
+
+    def _build_labeled_transcript(self, result: dict) -> str:
+        return result.get("text", "")
+
+
 class ElevenLabsMeetingTranscriber(_ScribeTranscriberBase):
     """Multichannel transcriber: speaker attribution by recording channel."""
 
@@ -176,7 +206,7 @@ class ElevenLabsDiarizedTranscriber(_ScribeTranscriberBase):
 
     The exception is the ElevenLabs workspace speaker library: with
     use_speaker_library, words from voices enrolled in the library come back
-    with the registered speaker ID (e.g. 'dimitri-sudomoin') instead of
+    with the registered speaker ID (e.g. 'jane-doe') instead of
     'speaker_N' (verified empirically 2026-07-22). When my_speaker_id is set
     and matched, labels turn on: that voice is you_label ('Me') and unmatched
     voices are them_label ('Them'), stable across chunks.

@@ -17,7 +17,7 @@ from modules.clean_text import clean_transcription
 from modules.history import TranscriptionHistory
 from modules.output_providers import initialize_providers
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
-from modules.settings import Settings
+from modules.settings import Settings, api_key_configured
 from modules.transcribe import transcribe_audio, is_conversation_recording
 from modules.tray import setup_tray_icon
 from modules.ui import UIFeedback
@@ -73,6 +73,9 @@ class VoiceTypingApp:
         # a leftover poll from a just-stopped recording can't start a second
         # concurrent chain (which could double-fire stop/flush actions)
         self._watchdog_token = 0
+        # Per-recording generation counter to handle overlapping processing;
+        # _recover_last_recording seeds it past surviving snapshot numbers
+        self._recording_generation = 0
 
         # Recover the most recent recording for retry-after-restart, then sweep stale snapshots
         self.last_recording = self._recover_last_recording()
@@ -90,10 +93,8 @@ class VoiceTypingApp:
             for error in plugin_errors:
                 self.logger.warning(f"Plugin error: {error}")
 
-        # Per-recording generation counter to handle overlapping processing
         self.processing_thread: Optional[threading.Thread] = None
         self.cancel_flag = threading.Event()
-        self._recording_generation = 0
         # Live streaming-transcription session for the current recording
         # (normal dictation mode with streaming_dictation enabled)
         self._streaming_session = None
@@ -289,6 +290,15 @@ class VoiceTypingApp:
     def _recover_last_recording(self) -> Optional[str]:
         """Find the most recent recording after a restart and clean up the rest."""
         snapshots = self._snapshot_paths()
+        # Seed the generation counter past any surviving snapshot numbers so
+        # this run's snapshots can never os.replace over a kept retry
+        # candidate from a previous run
+        for snap in snapshots:
+            try:
+                self._recording_generation = max(
+                    self._recording_generation, int(snap.suffixes[-2].lstrip('.')))
+            except (ValueError, IndexError):
+                continue
         newest_snapshot = str(snapshots[0]) if snapshots else None
         # Always keep the newest snapshot, even when a bare temp_audio.wav
         # exists: the bare file may be a partial recording from a crash, and
@@ -394,6 +404,11 @@ class VoiceTypingApp:
                 self.logger.warning("Recording hit max duration; transcribing what was captured")
                 self.recorder.max_duration_reached = False
 
+            if self.recorder.error is not None:
+                self.logger.warning(f"Recording ended by device error: {self.recorder.error}; "
+                                    "transcribing what was captured")
+                self.recorder.error = None
+
             # Snapshot path so a new recording can't overwrite the file mid-transcription
             recording_path = self.recorder.filename
             if os.path.exists(recording_path):
@@ -446,12 +461,15 @@ class VoiceTypingApp:
             self.recorder.continuation_chunk = True
             self.recorder.start()
 
-    def _end_session(self, auto_stopped: bool = False) -> None:
+    def _end_session(self, auto_stopped: bool = False,
+                     error: Optional[str] = None) -> None:
         """End the conversation session, discarding the unflushed tail.
 
         Audio since the last flush is dropped by design (press caps to flush
         before ending if you want it); chunks already queued keep delivering
-        in order."""
+        in order. Exception: when a recording ERROR ends the session (mic
+        unplugged, driver failure), the user didn't choose to end it, so the
+        tail is salvaged into the queue instead of discarded."""
         with self._toggle_lock:
             if not self._session_active:
                 return
@@ -463,6 +481,21 @@ class VoiceTypingApp:
             except Exception:
                 self.logger.error("Error stopping recorder", exc_info=True)
             self.recorder.auto_stopped = False
+            self.recorder.error = None
+            queue = self._chunk_queue
+            if error and queue is not None and os.path.exists(self.recorder.filename):
+                # Salvage audio captured before the device failed
+                self._recording_generation += 1
+                snapshot = self.recorder.filename + f".{self._recording_generation}.wav"
+                try:
+                    os.replace(self.recorder.filename, snapshot)
+                    if self.recorder.analyze_recording(snapshot)[0]:
+                        index = queue.submit(snapshot)
+                        self.logger.info(f"Salvaged session tail as chunk {index} after recording error")
+                    else:
+                        os.remove(snapshot)
+                except OSError:
+                    self.logger.warning("Could not salvage session tail", exc_info=True)
             try:
                 if os.path.exists(self.recorder.filename):
                     os.remove(self.recorder.filename)
@@ -470,7 +503,6 @@ class VoiceTypingApp:
                 self.logger.warning("Could not delete session tail", exc_info=True)
             self.ui_feedback.set_recording_note('')
             self._note_hold_until = 0.0
-            queue = self._chunk_queue
             if auto_stopped:
                 # First chunk never made a sound; nothing was queued
                 if queue is not None:
@@ -480,6 +512,17 @@ class VoiceTypingApp:
                     "⚠️ Recording stopped: No audio detected"
                 )
                 self.logger.warning("Session auto-stopped due to initial silence")
+                return
+            if error:
+                # Queued chunks (and any salvaged tail) still deliver in
+                # order; only new recording is dead
+                self.logger.error(f"Session ended by recording error: {error}")
+                self.status_manager.set_status(
+                    AppStatus.ERROR,
+                    "⚠️ Recording error — session ended"
+                )
+                if queue is not None:
+                    queue.close()
                 return
             self.logger.info("Conversation session ended")
             if queue is not None:
@@ -637,6 +680,16 @@ class VoiceTypingApp:
         token, so a stale pending callback exits instead of spawning a second
         chain that could double-fire stop/flush actions."""
         if token != self._watchdog_token:
+            return
+
+        if self.recording and self.recorder.error is not None:
+            # Device/stream failure (mic unplugged, driver error) — unlike the
+            # silent-start case below, audio already captured must be kept
+            if self._session_active:
+                threading.Thread(target=self._end_session,
+                                 kwargs={'error': self.recorder.error}, daemon=True).start()
+            else:
+                threading.Thread(target=self._stop_recording, daemon=True).start()
             return
 
         if self.recording and self.recorder.was_auto_stopped():
@@ -857,7 +910,7 @@ class VoiceTypingApp:
             enabling = not self.settings.get('meeting_mode')
 
             if enabling:
-                if not os.environ.get('ELEVENLABS_API_KEY'):
+                if not api_key_configured('ELEVENLABS_API_KEY'):
                     self.ui_feedback.show_warning(
                         "⚠️ Meeting mode needs ELEVENLABS_API_KEY in .env", 5000)
                     self.logger.warning("Meeting mode not enabled: ELEVENLABS_API_KEY missing")
@@ -897,7 +950,7 @@ class VoiceTypingApp:
             enabling = not self.settings.get('phone_mode')
 
             if enabling:
-                if not os.environ.get('ELEVENLABS_API_KEY'):
+                if not api_key_configured('ELEVENLABS_API_KEY'):
                     self.ui_feedback.show_warning(
                         "⚠️ Phone mode needs ELEVENLABS_API_KEY in .env", 5000)
                     self.logger.warning("Phone mode not enabled: ELEVENLABS_API_KEY missing")
@@ -922,7 +975,7 @@ class VoiceTypingApp:
         enabling = not self.settings.get('streaming_dictation')
 
         if enabling:
-            if not os.environ.get('OPENAI_API_KEY'):
+            if not api_key_configured('OPENAI_API_KEY'):
                 self.ui_feedback.show_warning(
                     "⚠️ Streaming dictation needs OPENAI_API_KEY in .env", 5000)
                 self.logger.warning("Streaming dictation not enabled: OPENAI_API_KEY missing")

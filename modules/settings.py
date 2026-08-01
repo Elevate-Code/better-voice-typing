@@ -6,7 +6,26 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
+
 logger = logging.getLogger('voice_typing')
+
+# Load .env as early as possible: settings migrations and the transcriber
+# factory both make decisions based on which API keys are present, and this
+# module is imported before any of them. Explicit path so the .env is found
+# regardless of the process working directory.
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
+
+
+def api_key_configured(name: str) -> bool:
+    """True if the environment variable holds a real-looking API key.
+
+    Unfilled .env template placeholders (e.g. 'sk_...') must not count as
+    configured — provider auto-selection would otherwise route to a service
+    that can only fail auth.
+    """
+    value = (os.environ.get(name) or '').strip().strip('"').strip("'")
+    return bool(value) and not value.endswith('...')
 
 # Settings live alongside logs/history so user data survives git operations on the repo
 SETTINGS_DIR = Path.home() / "Documents" / "VoiceTyping"
@@ -40,7 +59,9 @@ class Settings:
             'silence_threshold': 0.01,  # RMS threshold for silence detection (0.01 = -40dB)
             'max_recording_duration': 900.0,  # Auto-stop (and still transcribe) after this many seconds; null to disable
 
-            'stt_provider': 'openai',  # 'openai', 'custom'
+            # 'elevenlabs', 'openai', 'custom', or null = auto (ElevenLabs
+            # Scribe when ELEVENLABS_API_KEY is configured, else OpenAI)
+            'stt_provider': None,
             'stt_language': 'en',
             'openai_stt_model': 'gpt-4o-transcribe',  # 'whisper-1', 'gpt-4o-transcribe'
             'custom_stt_base_url': 'http://localhost:8000',
@@ -129,7 +150,8 @@ class Settings:
             self._migrate_device_settings(),
             self._migrate_silence_timeout(),
             self._migrate_obsolete_settings(),
-            self._migrate_llm_model_prefix()
+            self._migrate_llm_model_prefix(),
+            self._migrate_default_provider_elevenlabs()
         ]
 
         if any(migrations_run):
@@ -155,6 +177,22 @@ class Settings:
             changes_made = True
 
         return changes_made
+
+    def _migrate_default_provider_elevenlabs(self) -> bool:
+        """One-time move of settings still pinned to the old hardcoded
+        'openai' default onto the new automatic default (null = ElevenLabs
+        Scribe v2 when its key is configured, else OpenAI; Scribe benchmarked
+        12.25% vs 17.07% WER on dictation-style speech, st-vtt-bench
+        2026-07-31). Key-less setups resolve to OpenAI either way, so their
+        behavior is unchanged. Runs once, marked by
+        'migrated_default_elevenlabs', so an explicit provider choice made
+        afterwards always sticks."""
+        if self.current_settings.get('migrated_default_elevenlabs'):
+            return False
+        self.current_settings['migrated_default_elevenlabs'] = True
+        if self.current_settings.get('stt_provider') == 'openai':
+            self.current_settings['stt_provider'] = None
+        return True
 
     def _migrate_llm_model_prefix(self) -> bool:
         """litellm >= 1.84 no longer infers the provider from bare model names

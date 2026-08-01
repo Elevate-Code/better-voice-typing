@@ -58,6 +58,10 @@ class AudioRecorder:
         self.silent_start_timeout = silent_start_timeout
         self.auto_stopped = False
         self.max_duration_reached = False
+        # Set when the recording thread dies on a device/stream error (mic
+        # unplugged, driver failure). Distinct from auto_stopped (initial
+        # silence): callers must keep already-captured audio on errors.
+        self.error: Optional[str] = None
         self.max_duration: Optional[float] = None
         self.recording_start_time: Optional[float] = None
         self.initial_sound_detected = False  # Track if we've detected any sound
@@ -193,6 +197,7 @@ class AudioRecorder:
                         self.file.write(indata.copy())
                     except Exception as e:
                         logger.error(f"Audio callback error: {e}")
+                        self.error = f"audio write failed: {e}"
                         self.recording = False
                         raise sd.CallbackStop()
 
@@ -217,7 +222,8 @@ class AudioRecorder:
                         sd.sleep(100)
         except Exception as e:
             logger.error(f"Recording error: {e}", exc_info=True)
-            self.auto_stopped = True
+            self.error = str(e)
+            self.recording = False
         finally:
             with self._lock:
                 if self.stream is not None:
@@ -237,6 +243,7 @@ class AudioRecorder:
         """Start recording and reset silence detection"""
         self.auto_stopped = False
         self.max_duration_reached = False
+        self.error = None
         self.max_duration = settings.get('max_recording_duration')
         self.silence_start = None
         self.initial_sound_detected = False

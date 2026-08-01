@@ -109,7 +109,8 @@ if not exist .env (
         echo .env file created from template. Please edit it to add your API keys.
     ) else (
         echo WARNING: .env.example not found. Creating minimal .env file.
-        echo OPENAI_API_KEY=> .env
+        echo ELEVENLABS_API_KEY=> .env
+        echo OPENAI_API_KEY=>> .env
         echo ANTHROPIC_API_KEY=>> .env
     )
 )

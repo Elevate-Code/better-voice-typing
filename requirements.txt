@@ -10,9 +10,9 @@ websocket-client==1.9.0  # OpenAI Realtime websocket for streaming dictation
 
 # AI
 litellm==1.84.0 # model routing
-tenacity==8.5.0 # Retrying library
 openai==2.20.0  # litellm 1.84 requires openai>=2.20,<3
 anthropic==0.49.0
+httpx==0.28.1  # HTTP client (used directly for OpenAI STT timeouts)
 requests==2.33.0  # For update check
 
 # UI and system interaction

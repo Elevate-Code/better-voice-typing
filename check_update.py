@@ -37,6 +37,7 @@ def backup_user_files(backup_dir: Path, preserve_items: List[str]) -> bool:
             src = Path.cwd() / item
             if src.exists():
                 dst = backup_dir / item
+                dst.parent.mkdir(parents=True, exist_ok=True)
                 if src.is_dir():
                     shutil.copytree(src, dst, dirs_exist_ok=True)
                 else:
@@ -52,6 +53,7 @@ def restore_user_files(backup_dir: Path, preserve_items: List[str]) -> None:
         backup_path = backup_dir / item
         if backup_path.exists():
             dest = Path.cwd() / item
+            dest.parent.mkdir(parents=True, exist_ok=True)
             if dest.exists():
                 if dest.is_dir():
                     shutil.rmtree(dest)
@@ -144,7 +146,10 @@ def update_app() -> bool:
     if not latest or not download_url:
         return False
 
-    if latest == current:
+    # Release tags carry a 'v' prefix (e.g. 'v0.8.0') while version.txt
+    # stores the bare number — compare them normalized, or "up to date"
+    # would never trigger and every check would reinstall the app
+    if latest.lstrip('vV') == current.lstrip('vV'):
         print("Already up to date!")
         return True
 
@@ -153,7 +158,8 @@ def update_app() -> bool:
     # List of files/folders to preserve
     preserve_items = [
         '.env',                    # API keys and user settings
-        'settings.json'            # Any additional user settings
+        'settings.json',           # Any additional user settings
+        'modules/settings.json'    # Legacy settings location (pre-0.7); newer versions store settings in Documents\VoiceTyping
     ]
 
     with tempfile.TemporaryDirectory() as temp_dir_str:
@@ -192,7 +198,7 @@ def update_app() -> bool:
         print("2. If .env.example has new variables, add/update them in your .env file")
 
         if not deps_updated:
-            print("2. Update dependencies manually by running:")
+            print("3. Update dependencies manually by running:")
             print("  uv pip install -r requirements.txt")
 
         print("\n🎉 Update completed successfully!")

@@ -3,17 +3,15 @@ import os
 import logging
 from typing import Union, Optional
 from pathlib import Path
-from dotenv import load_dotenv
 
 # Provider modules are imported lazily inside _get_transcriber to keep app
 # startup fast (the OpenAI SDK in particular is a heavy import).
-from modules.settings import Settings
+# Note: importing Settings also loads .env, so os.environ checks below see
+# the user's configured API keys.
+from modules.settings import Settings, api_key_configured
 
 # OpenAI Speech to text docs: https://platform.openai.com/docs/guides/speech-to-text
 # ⚠️ IMPORTANT: OpenAI Audio API file uploads are currently limited to 25 MB
-
-# Explicit path so the .env is found regardless of the process working directory
-load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 logger = logging.getLogger('voice_typing')
 
@@ -32,7 +30,7 @@ def _get_transcriber(provider_name: str):
     Instances are cached per configuration.
 
     Args:
-        provider_name: Name of the provider ('openai', 'custom')
+        provider_name: Name of the provider ('elevenlabs', 'openai', 'custom')
 
     Returns:
         Transcriber instance for the specified provider
@@ -40,7 +38,14 @@ def _get_transcriber(provider_name: str):
     Raises:
         ValueError: If provider is unknown
     """
-    if provider_name == "openai":
+    if provider_name == "elevenlabs":
+        language = settings.get('stt_language') or 'en'
+        key = (provider_name, language)
+        if key not in _transcriber_cache:
+            from services.elevenlabs_stt import ElevenLabsDictationTranscriber
+            _transcriber_cache[key] = ElevenLabsDictationTranscriber(language=language)
+        return _transcriber_cache[key]
+    elif provider_name == "openai":
         model = settings.get('openai_stt_model') or 'gpt-4o-mini-transcribe'
         language = settings.get('stt_language') or 'en'
         key = (provider_name, model, language)
@@ -60,6 +65,16 @@ def _get_transcriber(provider_name: str):
     # Add other providers here as needed
     else:
         raise ValueError(f"Unknown STT provider: {provider_name}")
+
+
+def _default_provider() -> str:
+    """Resolve the automatic provider choice (stt_provider unset/null).
+
+    ElevenLabs Scribe when its key is configured (benchmarked at lower WER
+    on dictation-style speech than gpt-4o-transcribe), otherwise OpenAI —
+    so a setup with only an OPENAI_API_KEY keeps working out of the box.
+    """
+    return 'elevenlabs' if api_key_configured('ELEVENLABS_API_KEY') else 'openai'
 
 
 def is_multichannel_recording(filename: str) -> bool:
@@ -162,7 +177,7 @@ def transcribe_audio(filename: str, language: Optional[str] = None) -> str:
         logger.info("Phone recording detected; using ElevenLabs Scribe diarization")
         return _get_phone_transcriber().transcribe(filename)
 
-    provider = settings.get('stt_provider') or 'openai'
+    provider = settings.get('stt_provider') or _default_provider()
 
     # Get language from parameter or settings
     if language is None:
@@ -196,7 +211,7 @@ def set_stt_provider(provider: str) -> None:
     Change the active STT provider
 
     Args:
-        provider: Provider name ('openai', 'custom')
+        provider: Provider name ('elevenlabs', 'openai', 'custom')
     """
     # Validate provider
     try:
@@ -209,16 +224,25 @@ def set_stt_provider(provider: str) -> None:
 
 
 def get_current_provider() -> str:
-    """Get the currently configured STT provider"""
-    return settings.get('stt_provider') or 'openai'
+    """Get the currently configured STT provider (resolving the auto default)"""
+    return settings.get('stt_provider') or _default_provider()
 
 
 def get_available_providers() -> list:
     """Get list of available STT providers"""
     providers = []
 
+    # Check ElevenLabs (preferred default when its key is set; also powers
+    # meeting/phone modes)
+    if api_key_configured("ELEVENLABS_API_KEY"):
+        providers.append({
+            'name': 'elevenlabs',
+            'display_name': 'ElevenLabs Scribe',
+            'models': ['scribe_v2']
+        })
+
     # Check OpenAI
-    if os.environ.get("OPENAI_API_KEY"):
+    if api_key_configured("OPENAI_API_KEY"):
         providers.append({
             'name': 'openai',
             'display_name': 'OpenAI',

@@ -117,6 +117,8 @@ def create_microphone_menu(app):
 
 def create_stt_provider_menu(app):
     """Creates menu for STT provider and model selection"""
+    # stored None = automatic (resolved from available API keys)
+    stored_provider = app.settings.get('stt_provider')
     current_provider = transcribe.get_current_provider()
     available_providers = transcribe.get_available_providers()
 
@@ -129,20 +131,32 @@ def create_stt_provider_menu(app):
                 logger.error(f"Error changing STT provider: {e}")
         return handler
 
+    def auto_provider_handler(icon, item):
+        app.settings.set('stt_provider', None)
+        app.update_icon_menu()
+
     def make_model_handler(model: str):
         def handler(icon, item):
             app.settings.set('openai_stt_model', model)
             app.update_icon_menu()
         return handler
 
-    # Create provider selection items
-    provider_items = []
+    # Create provider selection items; Automatic shows what it resolves to
+    resolved_name = next((p['display_name'] for p in available_providers
+                          if p['name'] == current_provider), current_provider)
+    provider_items = [
+        pystray.MenuItem(
+            f'Automatic ({resolved_name})',
+            auto_provider_handler,
+            checked=lambda item: stored_provider is None
+        )
+    ]
     for provider in available_providers:
         provider_items.append(
             pystray.MenuItem(
                 provider['display_name'],
                 make_provider_handler(provider['name']),
-                checked=lambda item, p=provider: p['name'] == current_provider
+                checked=lambda item, p=provider: p['name'] == stored_provider
             )
         )
 
