@@ -10,7 +10,7 @@ A known issue is that the recorder activates and may show voice activity, but no
 
 You can make the app more sensitive to quiet audio by adjusting the `silence_threshold` in your `settings.json` file.
 
-1.  Open the `settings.json` file located in the application's root folder.
+1.  Open the `settings.json` file located in your `Documents\VoiceTyping\` folder.
 2.  Find or add the `"silence_threshold"` setting (eg. `"silence_threshold": 0.005,`).
 3.  Lower the value to make the silence detection more sensitive. See the table below for recommended values.
 

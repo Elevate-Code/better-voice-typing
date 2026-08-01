@@ -1,8 +1,19 @@
 {
-    "agent_rules": "When updating, first check for an existing entry with the same category and today's date. If one is found, append new changes to its 'changes' array. Otherwise, create a new object at the top of the 'changelog' array. Each object requires a 'category', a 'date' (YYYY-MM-DD), and a 'changes' array with descriptive, full-sentence strings. Use 'General' category for project-wide or uncategorized changes.",
-    "note_to_self_release_process": "To release a new version: 1. Commit and push all changes to main. 2. Create and push a git tag (eg. `git tag vX.Y.Z` then `git push origin vX.Y.Z`). 3. Go to GitHub Releases, draft a new release from the tag, copy/draft changelog notes, and publish.",
     "categories": ["General"],
     "changelog": [
+      {
+        "category": "General",
+        "date": "2026-07-31",
+        "version": "0.8.0",
+        "changes": [
+          "ElevenLabs Scribe v2 is now the preferred dictation provider: stt_provider defaults to null (automatic), which picks ElevenLabs when ELEVENLABS_API_KEY is configured and OpenAI otherwise — so OpenAI-only setups keep working unchanged, and unfilled .env placeholder values are ignored. In WER benchmarks on dictation-style speech, Scribe v2 was noticeably more accurate than gpt-4o-transcribe (12.25% vs 17.07%). Settings still pinned to the old hardcoded OpenAI default are moved to automatic once; an explicit provider choice made afterwards (including the new 'Automatic' option in the tray provider menu) always sticks.",
+          "The ElevenLabs dictation path now honors the stt_language setting instead of always transcribing as English.",
+          "A recording device failure mid-session (e.g. microphone unplugged) no longer discards the session's already-captured audio: queued chunks still transcribe and deliver in order, audio captured since the last send is salvaged into the queue, and the error is reported accurately instead of as 'No audio detected'. A device failure during normal dictation likewise transcribes what was captured.",
+          "Fixed the updater always re-downloading the app even when up to date (release tags carry a 'v' prefix that was never stripped before comparing versions), and made it preserve the legacy modules/settings.json so updating directly from v0.6.x or older no longer loses your settings.",
+          "Meeting Mode and Phone Mode now have a dedicated plain-language guide at docs/conversation-modes.md covering the session model, speaker labels, and voice matching; the README sections were condensed to overviews.",
+          "Repo cleanup for open-source hygiene: removed stale internal design docs and editor config files, moved maintainer notes out of this changelog, fixed an outdated settings-file path in the troubleshooting guide, and corrected a stale repository link in the README."
+        ]
+      },
       {
         "category": "General",
         "date": "2026-07-22",

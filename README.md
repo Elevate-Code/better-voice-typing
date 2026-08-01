@@ -10,7 +10,7 @@ A lightweight Python desktop app for Windows that improves upon Windows Voice Ty
 - A recording indicator with audio level appears on your screen(s) (position and display options configurable)
 - You can continue to navigate and type while recording, or click the recording indicator to cancel
 - Press `Caps Lock` again to stop recording and process the audio
-- The audio is sent to your chosen speech-to-text provider (OpenAI `gpt-4o-transcribe` by default)
+- The audio is sent to your chosen speech-to-text provider — ElevenLabs Scribe or OpenAI, picked automatically from the API keys you configure (ElevenLabs preferred when both are set; it benchmarked noticeably more accurate on dictation)
 - (optional) The transcribed text can be further refined with a quick pass of an LLM model
 - The transcribed text is inserted at your current cursor position in any text field or editor
 
@@ -29,42 +29,22 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
 - The recording indicator shows elapsed recording time, and recordings auto-stop (and still transcribe) at a configurable maximum duration
 - Only one instance of the app can run at a time; launching it again shows a notice instead of a second conflicting instance
 
-### Meeting Mode
+### Conversation capture: Meeting Mode & Phone Mode
 
-Toggle **🎧 Meeting Mode** in the tray menu to capture *both sides of a call*: recordings include your microphone plus system audio (whatever you hear — Meet/Zoom/Teams participants, videos, etc.) as separate channels. Transcripts come back speaker-labeled:
+Beyond dictation, two tray-menu modes capture a **conversation** and paste back a speaker-separated transcript — great for pulling a live call into an AI chat mid-conversation. Both require an [ElevenLabs](https://elevenlabs.io) API key.
 
-```
-Me: So walk me through the pricing concern again?
-Them: Well, mainly it's the onboarding fee that feels steep...
-```
+- **🎧 Meeting Mode** — for calls through your computer (Meet, Zoom, Teams…). Records your mic *plus* system audio as separate channels, so transcripts come back reliably labeled:
 
-- Attribution is by audio channel (your mic is always "Me"), not voice-guessing, so it's reliable even with similar voices. Multiple remote speakers share the "Them" label.
-- Requires an [ElevenLabs](https://elevenlabs.io) API key: add `ELEVENLABS_API_KEY="..."` to your `.env` (transcription uses Scribe v2 multichannel).
-- Labels are configurable via `meeting_speaker_you` / `meeting_speaker_them` in `settings.json`.
-- Recording runs as a **continuous session**: the first Caps Lock press starts it, and each following press *sends* everything captured since the last send for transcription while recording keeps rolling — so you can pull the conversation so far into a chat mid-call without losing what's said next. Click the recording indicator (or toggle the mode off) to end the session; audio since your last send is discarded, so press Caps Lock first if you want it.
-- Sent chunks transcribe in the background and are inserted at your cursor strictly in order. A failed chunk retries once automatically; if it still fails it's kept for **Retry Last Transcription** in the tray, and the session carries on.
-- The first chunk of each session is prefixed with a short bracketed transcript note addressed to whoever reads the paste (typically an AI assistant): voice-to-text mangles proper nouns and attribution, so interpret quietly from context. Disable via `session_preamble: false` in `settings.json`.
-- If system-audio capture fails, the recording falls back to normal mic-only dictation.
-- The recording indicator turns crimson-pink (instead of red) so you can tell meeting mode is active at a glance.
-- Tip: wear headphones; if your mic can hear your speakers, faint echoes of the other side may appear on your channel.
+  ```
+  Me: So walk me through the pricing concern again?
+  Them: Well, mainly it's the onboarding fee that feels steep...
+  ```
 
-### Phone Mode
+- **📞 Phone Mode** — for voices in the room (a phone on speaker, an in-person chat). Mic-only recording; speakers are separated onto their own lines by voice diarization, and you can optionally enroll your own voice for stable `Me:`/`Them:` labels.
 
-Toggle **📞 Phone Mode** in the tray menu for conversations happening *in the room* — a phone call on speaker, an in-person chat — where every voice reaches your microphone. Recording is mic-only (no system audio), and speaker turns are separated by voice diarization onto their own lines:
+Both record as a **continuous session**: press `Caps Lock` to send everything captured so far for transcription while recording keeps rolling; click the indicator to end the session. Sent chunks are transcribed in the background and inserted at your cursor strictly in order.
 
-```
-So walk me through the pricing concern again?
-Well, mainly it's the onboarding fee that feels steep...
-```
-
-- Turns are deliberately *unlabeled* by default: diarization can't know which voice is yours, and its generic "Speaker N" labels are assigned per chunk, so they can swap identities mid-session. Set `phone_speaker_labels: true` in `settings.json` if you want the labels anyway.
-- **Stable "Me:" / "Them:" labels via voice matching**: enroll your voice in ElevenLabs' workspace speaker library (dashboard → Speech to Text → Speakers → Add speaker, with 10–60s of your solo audio), then set `phone_my_speaker_id` in `settings.json` to your registered Speaker ID. Words matched to your voice come back with that ID instead of `speaker_N`, so your turns are labeled "Me:" and everyone else "Them:" — consistently across every chunk. Verified at ~98% word accuracy on a 4-speaker meeting recording.
-- `phone_diarization_threshold` (default `0.3`) replaces the `phone_num_speakers` hint when set (the API accepts only one). Beyond clustering, it empirically gates speaker-library match *acceptance*: in a seeded sweep the enrolled speaker only matched at ≥ 0.26 (stable through 0.4), while the API's default (~0.22) rejected the match. Set it to `null` to fall back to the `phone_num_speakers` hint (which disables the tuned matching).
-- Same continuous-session behavior as Meeting Mode (including the first-chunk transcript note): Caps Lock sends a chunk and keeps recording; click the indicator to end. Each chunk is prefixed with a `--- [chunk N] ---` header marking the discontinuity.
-- Requires an [ElevenLabs](https://elevenlabs.io) API key, same as Meeting Mode.
-- `phone_num_speakers` in `settings.json` (default `2`) hints the expected speaker count; set it higher for group conversations or `null` to let Scribe decide.
-- Meeting Mode and Phone Mode are mutually exclusive — enabling one turns the other off.
-- The recording indicator turns violet (instead of red) so you can tell phone mode is active at a glance.
+📖 **Full guide — setup, the session model, speaker labels, voice matching, and all related settings: [docs/conversation-modes.md](docs/conversation-modes.md)**
 
 ### Streaming Dictation (Beta)
 
@@ -83,7 +63,7 @@ Toggle **Streaming Dictation** under Settings to transcribe *while you speak* ov
   - Streaming Dictation (Beta): Transcribe while recording for near-instant results (see above).
   - Silent-Start Timeout: Cancels the recording if no sound is detected within the first few seconds, preventing accidental recordings.
   - Recording Indicator: Customize size, position, and multi-monitor display of the recording indicator.
-  - Speech-to-Text: Select your STT provider (OpenAI, Custom/Local) and model (Whisper, GPT-4o, GPT-4o Mini, or custom).
+  - Speech-to-Text: Select your STT provider (ElevenLabs Scribe, OpenAI, Custom/Local) and model.
   - Output Mode: Choose how text is inserted (see Plugins below).
   - Open Settings File / Open Logs Folder: Quick access to configuration and logs.
 - Restart: Quickly restart the application, like when it's not responding to the keyboard shortcut.
@@ -105,7 +85,8 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 | `max_recording_duration` | Maximum recording length in seconds; when reached, recording stops automatically and the captured audio is still transcribed. Set to `null` to disable. | `900.0` | `300.0`, `1200.0`, `null` |
 | `log_retention_days` | Number of days to keep log files. | `60` | `14`, `90`, `null` (indefinitely) |
 | `log_transcript_text` | Whether log files include the transcript text itself. Set to `false` to keep dictated content out of logs. | `true` | `true`, `false` |
-| `stt_provider` | The speech-to-text service to use. | `"openai"` | `"openai"`, `"custom"` |
+| `stt_provider` | The speech-to-text service to use. `null` picks automatically: ElevenLabs if `ELEVENLABS_API_KEY` is set, otherwise OpenAI. | `null` (auto) | `"elevenlabs"`, `"openai"`, `"custom"` |
+| `stt_language` | Language for transcription (ISO-639-1 code). | `"en"` | `"en"`, `"es"`, `"de"` |
 | `custom_stt_base_url` | Base URL for custom/local STT server. | `"http://localhost:8000"` | Any local or remote URL |
 | `custom_stt_model` | Model name for custom STT server. | `"parakeet-tdt-0.6b-v2"` | Model supported by your server |
 | `openai_stt_model` | The specific model to use for OpenAI's service. `gpt-4o-transcribe` is recommended for highest accuracy. | `"gpt-4o-transcribe"` | `"gpt-4o-transcribe"`, `"gpt-4o-mini-transcribe"` |
@@ -113,7 +94,7 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 
 ## Technical Details
 - Minimal UI built with Python tkinter
-- Multi-provider Speech-to-Text support with OpenAI GPT-4o models, Whisper, and custom local/remote servers
+- Multi-provider Speech-to-Text support: ElevenLabs Scribe, OpenAI GPT-4o models, Whisper, and custom local/remote servers
 - Extensible architecture for adding new STT providers (Azure, local models, etc.)
 - Audio is uploaded as FLAC (lossless, roughly half the size of WAV) to reduce latency and stay under API upload limits
 - User data (settings, transcription history, logs) lives in `Documents\VoiceTyping`, so app updates never touch it
@@ -122,7 +103,7 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 - For now, only supporting Windows OS and Python 3.10 - 3.12
 - When using `gpt-4o-transcribe`, the end of a transcription may occasionally be cut off - this is a [known model issue](https://community.openai.com/t/gpt-4o-transcribe-truncates-the-transcript/1148347). A workaround is in place to minimize this, but if it occurs, use the Retry Last Transcription and see the [Troubleshooting Guide](TROUBLESHOOTING.md).
 - When using the `gpt-4o-transcribe` model to transcribe spoken instructions, sometimes it responds to them or carries them out.
-- Untested update mechanism ([let me know if it doesn't work](https://github.com/jason-m-hicks/better-voice-typing/issues))
+- Update mechanism has had limited testing ([let me know if it doesn't work](https://github.com/Elevate-Code/better-voice-typing/issues))
 - Recordings may not produce transcriptions if your microphone's audio level is too low
 - OpenAI's API has a 25MB upload limit (roughly 20 minutes of audio with FLAC compression); recordings auto-stop at `max_recording_duration` (15 minutes by default) and are still transcribed
 
@@ -245,8 +226,9 @@ Plugin errors are logged to `Documents\VoiceTyping\logs` and shown briefly on st
    - Run: `setup.bat` (Command Prompt) or `.\setup.bat` (PowerShell)
    - This will create a virtual environment, install packages, and set up default configuration
    - If you encounter any installation issues, please [report them](https://github.com/Elevate-Code/better-voice-typing/issues)
-4. Open the `.env` file in Notepad, update the following and save:
-   - OpenAI API key ([get one here](https://platform.openai.com/api-keys))
+4. Open the `.env` file in Notepad, add at least one speech-to-text API key (not needed only if you run a local Custom STT server — see below), and save:
+   - ElevenLabs API key ([get one here](https://elevenlabs.io/app/settings/api-keys)) — recommended: best dictation accuracy, and required for Meeting/Phone modes
+   - and/or OpenAI API key ([get one here](https://platform.openai.com/api-keys)) — also enables Streaming Dictation
    - (Optional) Anthropic API key for text cleaning
 5. Launch the application by double-clicking the `run_voice_typing.bat` file in the application folder
 6. 💡 Ensure the app's tray icon is visible by right-clicking the taskbar → "Taskbar settings" → "Select which icons appear on the taskbar" → Toggle on for Voice Typing Assistant
@@ -254,7 +236,7 @@ Plugin errors are logged to `Documents\VoiceTyping\logs` and shown briefly on st
 
 **(Optional) Fine-tune transcript cleaning**
 
-GPT-4o-transcribe is usually accurate enough that an extra cleaning pass isn't necessary.
+Modern STT models are usually accurate enough that an extra cleaning pass isn't necessary.
 If you still want to use the post-processing feature:
 
 1. After the first run, open `settings.json`.
@@ -290,10 +272,10 @@ To update to the latest version:
 4. Activate with `.venv\Scripts\activate`
 5. Install dependencies with `uv pip install -r requirements.txt`
 6. Create a `.env` file based on `.env.example` by running `cp .env.example .env`
-7. Set up your API keys:
-   - Get an OpenAI API key from [OpenAI's API Keys page](https://platform.openai.com/api-keys)
-   - (Optional) Get an Anthropic API key if you want to use the text cleaning feature
-   - Add these keys to your `.env` file
+7. Set up your API keys in `.env` (at least one STT key):
+   - ElevenLabs API key from the [ElevenLabs dashboard](https://elevenlabs.io/app/settings/api-keys) (recommended default; powers Meeting/Phone modes)
+   - and/or OpenAI API key from [OpenAI's API Keys page](https://platform.openai.com/api-keys) (also powers Streaming Dictation)
+   - (Optional) Anthropic API key if you want to use the text cleaning feature
 8. Run the app from the command line:
    ```
    .\.venv\Scripts\python.exe .\voice_typing.pyw
