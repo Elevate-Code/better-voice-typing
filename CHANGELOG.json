@@ -11,7 +11,8 @@
           "A recording device failure mid-session (e.g. microphone unplugged) no longer discards the session's already-captured audio: queued chunks still transcribe and deliver in order, audio captured since the last send is salvaged into the queue, and the error is reported accurately instead of as 'No audio detected'. A device failure during normal dictation likewise transcribes what was captured.",
           "Fixed the updater always re-downloading the app even when up to date (release tags carry a 'v' prefix that was never stripped before comparing versions), and made it preserve the legacy modules/settings.json so updating directly from v0.6.x or older no longer loses your settings.",
           "Meeting Mode and Phone Mode now have a dedicated plain-language guide at docs/conversation-modes.md covering the session model, speaker labels, and voice matching; the README sections were condensed to overviews.",
-          "Repo cleanup for open-source hygiene: removed stale internal design docs and editor config files, moved maintainer notes out of this changelog, fixed an outdated settings-file path in the troubleshooting guide, and corrected a stale repository link in the README."
+          "Repo cleanup for open-source hygiene: removed stale internal design docs and editor config files, moved maintainer notes out of this changelog, fixed an outdated settings-file path in the troubleshooting guide, and corrected a stale repository link in the README.",
+          "Security: updated Pillow to 12.3.0, resolving all 13 open Dependabot alerts (10 high, 3 moderate)."
         ]
       },
       {

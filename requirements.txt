@@ -18,6 +18,6 @@ requests==2.33.0  # For update check
 # UI and system interaction
 pyautogui==0.9.54  # Cursor/text manipulation
 pystray==0.19.5  # System tray icon
-Pillow==12.2.0  # Required by pystray for icons
+Pillow==12.3.0  # Required by pystray for icons
 numpy==2.0.2
 pyperclip==1.9.0
