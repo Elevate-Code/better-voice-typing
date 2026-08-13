@@ -3,6 +3,20 @@
     "changelog": [
       {
         "category": "General",
+        "date": "2026-08-13",
+        "changes": [
+          "Meeting and Phone mode sessions now acknowledge every caps-lock send in the recording indicator: the label immediately shows 'transcribing…' while the chunk is processed (recording continues), 'N queued' if sends stack up, a brief 'pasted' confirmation once the text lands at the cursor, and 'nothing new to send' when a send is skipped because nothing was said since the last one.",
+          "Sending a chunk in Meeting/Phone mode now restarts microphone capture before analyzing the sealed chunk instead of after, shrinking the short gap at each chunk boundary where speech could be missed.",
+          "Microphone menu overhaul: the checkmark now moves immediately when you select a device, favorite microphones are pinned to the top of the Select Device list, and favorites/selection are matched by device name so they no longer silently stop matching when a device reports different specs.",
+          "'Refresh Devices' now performs a real rescan, so microphones plugged in or removed while the app is running actually appear (previously the list was frozen at startup). The saved microphone selection is re-resolved after each rescan.",
+          "The default-device marker in the microphone menu now always points at the actual Windows default input device; previously it followed whatever device you had selected.",
+          "Changing the microphone during a Meeting/Phone session now takes effect immediately by sending the current chunk and continuing on the new device.",
+          "The session preamble (first chunk of a Meeting/Phone session) now also briefs the reading AI on how to collaborate: act as a silent advisor, explore relevant context as the conversation progresses, keep replies brief, and bold anything it wants said aloud.",
+          "The microphone list no longer shows each device 3-5 times: Windows exposes every device once per audio host API (some with names cut off at 31 characters), and the menu now lists each physical device exactly once under its full name, matching what Windows Sound settings shows. Recording still automatically uses the resampling-capable variant of the chosen device behind the scenes, so all recording sample rates keep working. Saved device selections and favorites with truncated names are upgraded automatically when unambiguous."
+        ]
+      },
+      {
+        "category": "General",
         "date": "2026-07-31",
         "version": "0.8.0",
         "changes": [

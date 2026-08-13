@@ -7,6 +7,7 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
+from modules.audio_manager import get_capture_device_id
 from modules.settings import Settings
 
 logger = logging.getLogger('voice_typing')
@@ -217,6 +218,7 @@ class AudioRecorder:
                     self.file.comment = PHONE_RECORDING_COMMENT
                 with sd.InputStream(samplerate=self.samplerate,
                                   channels=1,
+                                  device=get_capture_device_id(self.samplerate),
                                   callback=audio_callback) as self.stream:
                     while self.recording:
                         sd.sleep(100)
@@ -241,6 +243,19 @@ class AudioRecorder:
 
     def start(self) -> None:
         """Start recording and reset silence detection"""
+        if self.thread is not None and self.thread.is_alive():
+            # stop() timed out and the previous recording thread is still
+            # alive: starting now would share recording/stream/file state
+            # between two live generations (the old thread's cleanup could
+            # close the new recording's handles). Give it one more chance to
+            # exit, else refuse — the watchdog surfaces self.error to the
+            # caller and already-captured audio is kept.
+            self.thread.join(timeout=3.0)
+            if self.thread.is_alive():
+                logger.error("Previous recording thread still running; "
+                             "refusing to start a new recording")
+                self.error = "previous recording thread stuck"
+                return
         self.auto_stopped = False
         self.max_duration_reached = False
         self.error = None

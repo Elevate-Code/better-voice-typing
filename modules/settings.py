@@ -103,8 +103,9 @@ class Settings:
             # stable through 0.4) while the default ~0.22 rejected the match.
             # Set null to use phone_num_speakers instead.
             'phone_diarization_threshold': 0.3,
-            # Prepend a short transcript-limitations note (for the LLM reading
-            # it) to the first chunk delivered in a meeting/phone session
+            # Prepend a short note (for the LLM reading it) to the first chunk
+            # delivered in a meeting/phone session: transcript limitations
+            # plus silent-advisor collaboration guidance
             'session_preamble': True,
 
             'clean_transcription': False,
@@ -148,6 +149,7 @@ class Settings:
         """Runs all necessary setting migrations and saves if changes were made."""
         migrations_run = [
             self._migrate_device_settings(),
+            self._migrate_truncated_device_names(),
             self._migrate_silence_timeout(),
             self._migrate_obsolete_settings(),
             self._migrate_llm_model_prefix(),
@@ -253,6 +255,48 @@ class Settings:
                 changes_made = True
 
         return changes_made
+
+    def _migrate_truncated_device_names(self) -> bool:
+        """Upgrades saved device identifiers whose names came from MME (which
+        truncates names to 31 chars) to the full WASAPI name and specs.
+
+        Only rewrites when exactly one current device matches the truncated
+        name — ambiguous prefixes (e.g. two Bluetooth headsets whose long
+        driver names share the first 31 chars) and unplugged devices are left
+        alone; runtime matching stays truncation-tolerant for those, and this
+        migration retries every launch until they resolve."""
+        from modules.audio_manager import (get_input_devices,
+                                           create_device_identifier,
+                                           MME_NAME_LIMIT)
+        try:
+            devices = get_input_devices()
+        except Exception:
+            return False
+        changed = False
+
+        def upgrade(entry: Any) -> Any:
+            nonlocal changed
+            name = entry.get('name') if isinstance(entry, dict) else None
+            if not name or len(name) != MME_NAME_LIMIT:
+                return entry
+            # A device with this exact name exists: the saved name is a real
+            # full name, not a truncation — leave it
+            if any(d['name'] == name for d in devices):
+                return entry
+            matches = [d for d in devices
+                       if d['name'].startswith(name)]
+            if len(matches) == 1:
+                changed = True
+                return create_device_identifier(matches[0])._asdict()
+            return entry
+
+        self.current_settings['selected_microphone'] = upgrade(
+            self.current_settings.get('selected_microphone'))
+        favorites = self.current_settings.get('favorite_microphones')
+        if isinstance(favorites, list):
+            self.current_settings['favorite_microphones'] = [
+                upgrade(f) for f in favorites]
+        return changed
 
     def load_settings(self) -> Dict[str, Any]:
         try:

@@ -28,7 +28,7 @@ Behind the scenes:
 - Sent chunks transcribe concurrently in the background but are inserted at your cursor **strictly in order**, so the assembled transcript always reads chronologically.
 - A failed chunk retries once automatically; if it fails again, its audio is kept for **Retry Last Transcription** in the tray and the session carries on.
 - Chunks where nothing was said are skipped silently.
-- The first chunk of each session is prefixed with a short bracketed note addressed to whoever reads the paste (typically an AI assistant), warning that proper nouns and speaker attribution may be imperfect. Disable with `session_preamble: false`.
+- The first chunk of each session is prefixed with a short bracketed note addressed to whoever reads the paste (typically an AI assistant): it warns that proper nouns and speaker attribution may be imperfect, and asks the reader to act as a silent advisor — exploring relevant context as the conversation progresses, keeping replies brief, and bolding anything it wants you to say aloud. Disable with `session_preamble: false`.
 - If a recording error ends the session (e.g. the mic disappears), audio captured up to the failure is salvaged and queued rather than lost.
 
 ## Meeting Mode details
@@ -72,7 +72,7 @@ All in `Documents\VoiceTyping\settings.json` (tray → Settings → Open Setting
 | Setting | Description | Default |
 | --- | --- | --- |
 | `meeting_speaker_you` / `meeting_speaker_them` | The two speaker labels (used by both modes). | `"Me"` / `"Them"` |
-| `session_preamble` | Prefix the first chunk of a session with a transcript-limitations note for the reader. | `true` |
+| `session_preamble` | Prefix the first chunk of a session with a note for the reader: transcript limitations plus silent-advisor collaboration guidance. | `true` |
 | `phone_speaker_labels` | Show generic per-chunk `Speaker N:` labels in Phone Mode. | `false` |
 | `phone_num_speakers` | Hint for the expected speaker count; `null` lets Scribe decide. Ignored while `phone_diarization_threshold` is set (the API accepts only one of the two). | `2` |
 | `phone_diarization_threshold` | Diarization sensitivity (0.1–0.4). Also gates how willing the API is to match voices against the speaker library — the default was chosen empirically so enrolled-voice matching works reliably. Set `null` to use `phone_num_speakers` instead (disables tuned matching). | `0.3` |

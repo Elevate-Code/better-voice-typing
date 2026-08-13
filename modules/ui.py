@@ -417,11 +417,12 @@ class UIFeedback:
     def set_recording_note(self, note: str) -> None:
         """Short status note appended to the recording label (e.g. queued-chunk
         count or a chunk failure during a conversation session); pass '' to
-        clear. Thread-safe; the label refreshes on the next elapsed-time tick
-        (≤1s). The warning overlay can't be used here: while recording, the
-        pulse animation and the elapsed-time ticker would overwrite it."""
+        clear. Thread-safe; the label refreshes immediately. The warning
+        overlay can't be used here: while recording, the pulse animation and
+        the elapsed-time ticker would overwrite it."""
         def impl() -> None:
             self._recording_note = note
+            self._refresh_recording_label()
         self._call_on_ui_thread(impl)
 
     def insert_text(self, text: str, output_mode: str = 'standard') -> None:
@@ -597,8 +598,15 @@ class UIFeedback:
 
     def _tick_recording_timer(self) -> None:
         self._timer_after_id = None
-        if self._recording_started is None or not self.pulsing:
+        if not self._refresh_recording_label():
             return
+        self._timer_after_id = self.root.after(1000, self._tick_recording_timer)
+
+    def _refresh_recording_label(self) -> bool:
+        """Repaint the recording label (base text + note + elapsed time).
+        Runs on the Tk thread; returns False when no recording is live."""
+        if self._recording_started is None or not self.pulsing:
+            return False
         elapsed = int(time.monotonic() - self._recording_started)
         minutes, seconds = divmod(elapsed, 60)
         note = f"  {self._recording_note}" if self._recording_note else ""
@@ -606,10 +614,10 @@ class UIFeedback:
             for label in self.labels:
                 label.configure(text=f"{self._recording_base_text}{note}  {minutes}:{seconds:02d}")
         except tk.TclError:
-            return
-        # Text width changes as the timer advances; re-fit the window once
+            return False
+        # Text width changes as the text advances; re-fit the window once
         self._schedule_snap(passes=1)
-        self._timer_after_id = self.root.after(1000, self._tick_recording_timer)
+        return True
 
     def _darken_color(self, color: str) -> str:
         """Create a darker version of the given color for pulsing effect"""

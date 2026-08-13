@@ -68,7 +68,17 @@ class VoiceTypingApp:
         self._session_active = False
         self._chunk_queue: Optional[ChunkQueue] = None
         self._recent_queues: list[ChunkQueue] = []
-        self._note_hold_until = 0.0
+        # Session-note display model: a routine STATE line (transcribing /
+        # queued / pasted) plus an optional timed ALERT overriding it (chunk
+        # retrying/failed, quiet flush). Alerts expire back to the current
+        # state, so the label can never be left stale. _note_lock serializes
+        # all writers (hook thread, queue workers, expiry timers), which also
+        # keeps UI-queue ordering consistent with note ordering.
+        self._note_lock = threading.Lock()
+        self._note_state = ''
+        self._note_state_seq = 0
+        self._note_alert = ''
+        self._note_alert_until = 0.0
         # Scopes the recorder watchdog to the recording that scheduled it, so
         # a leftover poll from a just-stopped recording can't start a second
         # concurrent chain (which could double-fire stop/flush actions)
@@ -182,66 +192,88 @@ class VoiceTypingApp:
         )
 
     def _initialize_microphone(self) -> None:
-        """Initialize microphone device from settings or default"""
+        """Resolve the saved microphone (or the system default) to a live device.
+
+        A saved microphone that can't be resolved right now — unplugged, or a
+        legacy truncated name matching several devices — is KEPT in settings
+        and the default used temporarily, so it takes over again once it
+        resolves (next launch or Refresh Devices)."""
         try:
+            device = None
             saved_identifier = self.settings.get('selected_microphone')
             if saved_identifier is not None:
                 try:
-                    # Convert dictionary back to DeviceIdentifier
                     identifier = DeviceIdentifier(**saved_identifier)
                     device = find_device_by_identifier(identifier)
-                    if device:
-                        set_input_device(device['id'])
-                        self.logger.info(f"Using saved microphone: {device['name']} (ID: {device['id']}, Channels: {device['max_input_channels']}, Sample Rate: {device['default_samplerate']} Hz)")
-                    else:
-                        # Fallback to default if saved device not found
-                        self.settings.set('selected_microphone', None)
-                        default_id = get_default_device_id()
-                        set_input_device(default_id)
-                        self.logger.warning(f"Saved microphone not found, using default device (ID: {default_id})")
-                except Exception as e:
-                    self.logger.error(f"Error setting saved microphone: {e}")
-                    # Fallback to default
-                    self.settings.set('selected_microphone', None)
-                    default_id = get_default_device_id()
-                    set_input_device(default_id)
-                    self.logger.info(f"Using default microphone (ID: {default_id}) due to error")
-            else:
-                # No saved microphone, use default
-                default_id = get_default_device_id()
-                set_input_device(default_id)
-                self.logger.info(f"No saved microphone, using default device (ID: {default_id})")
-        except Exception as e:
-            self.logger.error(f"Error setting saved microphone: {e}", exc_info=True)
-            # Fallback to default
-            self.settings.set('selected_microphone', None)
+                except Exception:
+                    self.logger.error("Saved microphone setting unusable; using default",
+                                      exc_info=True)
+            if device:
+                set_input_device(device['id'])
+                self.logger.info(f"Using saved microphone: {device['name']} (ID: {device['id']}, Channels: {device['max_input_channels']}, Sample Rate: {device['default_samplerate']} Hz)")
+                return
             default_id = get_default_device_id()
             set_input_device(default_id)
-            self.logger.info(f"Using default microphone (ID: {default_id}) due to initialization error")
+            if saved_identifier is not None:
+                self.logger.warning(f"Saved microphone not available; using default "
+                                    f"(ID: {default_id}) until it can be resolved")
+            else:
+                self.logger.info(f"No saved microphone, using default device (ID: {default_id})")
+        except Exception:
+            # Even the default couldn't be determined; drop any stale runtime
+            # selection so recording streams fall back to the system default
+            self.logger.error("Microphone initialization failed", exc_info=True)
+            set_input_device(None)
 
     def set_microphone(self, device_id: int) -> None:
-        """Change the active microphone device"""
+        """Change the active microphone device.
+
+        An in-progress recording keeps its already-open stream — the new
+        device applies from the next recorder start. In a conversation
+        session that next start is forced immediately by flushing the current
+        chunk, so the switch takes effect mid-session."""
         try:
             # Get device info for proper identifier storage
             from modules.audio_manager import get_device_by_id, create_device_identifier
             device = get_device_by_id(device_id)
-            if device:
-                identifier = create_device_identifier(device)
-                set_input_device(device_id)
-                self.settings.set('selected_microphone', identifier._asdict())
-                self.logger.info(f"Microphone changed to: {device['name']} (ID: {device_id}, Channels: {device['max_input_channels']}, Sample Rate: {device['default_samplerate']} Hz)")
-            else:
+            if not device:
                 raise ValueError(f"Device with ID {device_id} not found")
-            # Stop any ongoing recording when changing microphone
-            if self.recording:
-                self.handle_ui_click()
+            identifier = create_device_identifier(device)
+            previous = self.settings.get('selected_microphone')
+            changed = not (isinstance(previous, dict) and
+                           previous.get('name') == device['name'])
+            set_input_device(device_id)
+            self.settings.set('selected_microphone', identifier._asdict())
+            self.logger.info(f"Microphone changed to: {device['name']} (ID: {device_id}, Channels: {device['max_input_channels']}, Sample Rate: {device['default_samplerate']} Hz)")
+            if changed and self._session_active:
+                threading.Thread(target=self._flush_chunk, daemon=True).start()
         except Exception as e:
             self.logger.error(f"Error setting microphone: {e}", exc_info=True)
             self.logger.debug(f"Failed device_id: {device_id}")
             self.ui_feedback.show_warning("⚠️ Error changing microphone")
 
     def refresh_microphones(self) -> None:
-        """Refresh the microphone list and update the tray menu"""
+        """Rescan audio devices and rebuild the tray menu.
+
+        PortAudio snapshots the device list at init, so a real rescan needs a
+        reinitialization — which must not happen while a stream is open, and
+        shifts device IDs, so the saved selection is re-resolved afterwards."""
+        from modules.audio_manager import refresh_devices
+        with self._toggle_lock:
+            if self.recording:
+                # show_warning would be repainted over by the recording
+                # pulse/ticker; the recording note is the visible channel here
+                self._set_session_alert("⚠️ can't refresh devices while recording", 3.0)
+                return
+            try:
+                refresh_devices()
+            except Exception:
+                # Backend state is unknown; don't re-resolve devices or
+                # rebuild the menu against it
+                self.logger.error("Audio device rescan failed", exc_info=True)
+                self.ui_feedback.show_warning("⚠️ Device rescan failed", 4000)
+                return
+            self._initialize_microphone()
         if self.update_icon_menu:
             self.update_icon_menu()
 
@@ -434,10 +466,15 @@ class VoiceTypingApp:
         with self._toggle_lock:
             if not (self.recording and self._session_active):
                 return
+            # Acknowledge the caps press right away — the stop/restart and
+            # chunk analysis below can take a moment, and the user needs to
+            # see the flush registered (recording continues throughout)
+            self._set_session_state("📤 transcribing…", clear_alert=True)
             self.recorder.stop()
             self._recording_generation += 1
             gen = self._recording_generation
             path = self.recorder.filename
+            snapshot: Optional[str] = None
             if os.path.exists(path):
                 snapshot = path + f".{gen}.wav"
                 try:
@@ -445,21 +482,26 @@ class VoiceTypingApp:
                 except OSError:
                     snapshot = None
                     self.logger.error("Could not snapshot chunk; skipping it", exc_info=True)
-                if snapshot:
-                    is_valid, reason = self.recorder.analyze_recording(snapshot)
-                    if is_valid:
-                        index = self._chunk_queue.submit(snapshot)
-                        self.logger.info(f"Chunk {index} queued for transcription")
-                    else:
-                        # Quiet flush (nothing said since the last one): drop it
-                        # without the error flash a failed dictation would get
-                        self.logger.info(f"Skipping chunk: {reason}")
-                        try:
-                            os.remove(snapshot)
-                        except OSError:
-                            pass
+                    self._set_session_alert("⚠️ chunk could not be saved", 5.0)
+            # Restart capture before analyzing/queueing the sealed chunk: the
+            # snapshot is a closed file, so this shrinks the not-recording gap
+            # (where spoken words are lost) to just the stop/restart itself
             self.recorder.continuation_chunk = True
             self.recorder.start()
+            if snapshot:
+                is_valid, reason = self.recorder.analyze_recording(snapshot)
+                if is_valid:
+                    index = self._chunk_queue.submit(snapshot)
+                    self.logger.info(f"Chunk {index} queued for transcription")
+                else:
+                    # Quiet flush (nothing said since the last one): drop it
+                    # without the error flash a failed dictation would get
+                    self.logger.info(f"Skipping chunk: {reason}")
+                    self._set_session_alert("🔇 nothing new to send", 3.0)
+                    try:
+                        os.remove(snapshot)
+                    except OSError:
+                        pass
 
     def _end_session(self, auto_stopped: bool = False,
                      error: Optional[str] = None) -> None:
@@ -501,8 +543,7 @@ class VoiceTypingApp:
                     os.remove(self.recorder.filename)
             except OSError:
                 self.logger.warning("Could not delete session tail", exc_info=True)
-            self.ui_feedback.set_recording_note('')
-            self._note_hold_until = 0.0
+            self._reset_session_notes()
             if auto_stopped:
                 # First chunk never made a sound; nothing was queued
                 if queue is not None:
@@ -570,7 +611,13 @@ class VoiceTypingApp:
                 "voice-to-text, arriving in chunks as the call happens. "
                 f"{speakers}. Proper nouns and abbreviations are often "
                 "mistranscribed — quietly interpret them from context; you "
-                "don't need to surface these corrections to me.]"
+                "don't need to surface these corrections to me. I'm in this "
+                "conversation live, so act as my silent advisor: as it "
+                "progresses, feel free to quickly explore for docs or "
+                "context relevant to what's being discussed. I can only "
+                "glance at your replies briefly — keep them short, and put "
+                "anything you want me to actually say or ask in **bold** so "
+                "my eyes are drawn to it.]"
             )
 
         def is_current() -> bool:
@@ -597,7 +644,7 @@ class VoiceTypingApp:
 
         def on_retrying(index: int) -> None:
             if self._session_active and is_current():
-                self._set_session_note(f"⚠️ chunk {index} retrying…", hold_s=6.0)
+                self._set_session_alert(f"⚠️ chunk {index} retrying…", 6.0)
             elif not self.recording:
                 self.ui_feedback.show_warning(f"⚠️ Chunk {index} failed, retrying…", 3000)
 
@@ -609,7 +656,7 @@ class VoiceTypingApp:
             if not (self.processing_thread and self.processing_thread.is_alive()):
                 self.last_recording = path
             if self._session_active and is_current():
-                self._set_session_note(f"⚠️ chunk {index} failed", hold_s=6.0)
+                self._set_session_alert(f"⚠️ chunk {index} failed", 6.0)
             elif not self.recording:
                 self.ui_feedback.show_warning(f"⚠️ Chunk {index} failed (retry from tray)", 5000)
             else:
@@ -620,9 +667,13 @@ class VoiceTypingApp:
         def on_pending(count: int) -> None:
             if not (self._session_active and is_current()):
                 return
-            # A backlog of 1 is the normal state right after a flush; only
-            # surface it once chunks start stacking up
-            self._set_session_note(f"⏳ {count} queued" if count >= 2 else "")
+            if count == 0:
+                # The last outstanding chunk was just delivered at the cursor
+                self._set_session_state("✅ pasted", decay_s=5.0)
+            elif count == 1:
+                self._set_session_state("📤 transcribing…")
+            else:
+                self._set_session_state(f"⏳ {count} queued")
 
         def on_drained(failed_paths: list) -> None:
             if not is_current() or self.recording:
@@ -661,15 +712,65 @@ class VoiceTypingApp:
         self._recent_queues.append(queue)
         return queue
 
-    def _set_session_note(self, note: str, hold_s: float = 0.0) -> None:
-        """Show a note in the recording label; hold_s protects it from being
-        overwritten by routine pending-count updates for that long."""
-        now = time.monotonic()
-        if hold_s:
-            self._note_hold_until = now + hold_s
-        elif now < self._note_hold_until:
-            return
+    def _push_session_note_locked(self) -> None:
+        """Recompute and push the visible note (alert while unexpired, else
+        the state line). Caller must hold _note_lock."""
+        if self._note_alert and time.monotonic() < self._note_alert_until:
+            note = self._note_alert
+        else:
+            self._note_alert = ''
+            note = self._note_state
         self.ui_feedback.set_recording_note(note)
+
+    def _set_session_state(self, note: str, decay_s: float = 0.0,
+                           clear_alert: bool = False) -> None:
+        """Set the routine session-state line. decay_s clears it back to ''
+        after that long unless superseded. clear_alert also dismisses an
+        active alert — used for fresh user actions (a caps-press flush must
+        always be acknowledged, even mid-alert)."""
+        with self._note_lock:
+            self._note_state_seq += 1
+            seq = self._note_state_seq
+            self._note_state = note
+            if clear_alert:
+                self._note_alert = ''
+            self._push_session_note_locked()
+        if decay_s and note:
+            def decay() -> None:
+                with self._note_lock:
+                    if seq == self._note_state_seq:
+                        self._note_state = ''
+                        self._push_session_note_locked()
+            timer = threading.Timer(decay_s, decay)
+            timer.daemon = True
+            timer.start()
+
+    def _set_session_alert(self, note: str, duration_s: float) -> None:
+        """Show a transient alert over the state line; it expires back to
+        whatever the state line says then."""
+        with self._note_lock:
+            self._note_alert = note
+            self._note_alert_until = time.monotonic() + duration_s
+            self._push_session_note_locked()
+
+        def expire() -> None:
+            # Re-evaluates under the lock: a newer/extended alert keeps
+            # showing, an expired one falls back to the current state
+            with self._note_lock:
+                self._push_session_note_locked()
+        timer = threading.Timer(duration_s + 0.1, expire)
+        timer.daemon = True
+        timer.start()
+
+    def _reset_session_notes(self) -> None:
+        """Clear both note layers and invalidate outstanding decay timers, so
+        a previous session's timers can't touch a later session's notes."""
+        with self._note_lock:
+            self._note_state_seq += 1
+            self._note_state = ''
+            self._note_alert = ''
+            self._note_alert_until = 0.0
+            self.ui_feedback.set_recording_note('')
 
     # Add this method to check recorder status periodically
     def _check_recorder_status(self, token: int) -> None:
@@ -1061,15 +1162,6 @@ class VoiceTypingApp:
         except Exception as e:
             self.logger.warning(f"Streaming session unavailable, using batch: {e}")
             return None
-
-    def toggle_favorite_microphone(self, device_id: int) -> None:
-        """Toggle favorite status for a microphone device"""
-        favorites = self.settings.get('favorite_microphones')
-        if device_id in favorites:
-            favorites.remove(device_id)
-        else:
-            favorites.append(device_id)
-        self.settings.set('favorite_microphones', favorites)
 
     def toggle_silence_detection(self) -> None:
         """Toggle silence detection on/off"""

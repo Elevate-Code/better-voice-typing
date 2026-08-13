@@ -10,7 +10,7 @@ import pyperclip
 import pystray
 from PIL import Image, ImageDraw
 
-from modules.audio_manager import get_input_devices, get_default_device_id, set_input_device, create_device_identifier
+from modules.audio_manager import get_input_devices, get_default_device_id, create_device_identifier, names_match
 from modules import transcribe
 from modules import output_providers
 from modules.logger import get_log_dir
@@ -42,66 +42,77 @@ def create_copy_menu(app):
     ]
 
 def create_microphone_menu(app):
-    """Creates dynamic menu of available microphones"""
+    """Creates dynamic menu of available microphones.
+
+    Devices are matched to saved settings by name rather than full identifier
+    (name, channels, samplerate): the same physical device can report
+    different specs via different host APIs, and exact-tuple equality made
+    selection checkmarks and favorites silently stop matching. The checked
+    callables read settings live so the menu stays truthful even between
+    rebuilds."""
     devices = sorted(get_input_devices(), key=lambda d: d['name'].lower())
-    current_identifier = app.settings.get('selected_microphone')
-    favorite_identifiers = app.settings.get('favorite_microphones')
-    default_device_id = get_default_device_id()
+    try:
+        default_device_id = get_default_device_id()
+    except Exception:
+        logger.warning("Could not determine default input device", exc_info=True)
+        default_device_id = None
+
+    def is_favorite(device: Dict[str, any]) -> bool:
+        return any(isinstance(f, dict) and
+                   names_match(f.get('name') or '', device['name'])
+                   for f in app.settings.get('favorite_microphones'))
+
+    def is_selected(device: Dict[str, any]) -> bool:
+        selected = app.settings.get('selected_microphone')
+        return (isinstance(selected, dict) and
+                names_match(selected.get('name') or '', device['name']))
 
     def make_mic_handler(device: Dict[str, any]):
         def handler(icon, item):
-            identifier = create_device_identifier(device)._asdict()
-            app.settings.set('selected_microphone', identifier)
-            set_input_device(device['id'])
-            # Log the device change
-            app.logger.info(f"Microphone changed to: {device['name']} (ID: {device['id']}, Channels: {device['max_input_channels']}, Sample Rate: {device['default_samplerate']} Hz)")
+            app.set_microphone(device['id'])
+            app.update_icon_menu()
         return handler
 
     def make_favorite_handler(device: Dict[str, any]):
         def handler(icon, item):
-            identifier = create_device_identifier(device)._asdict()
-            favorites = app.settings.get('favorite_microphones')
-
-            if identifier in favorites:
-                favorites.remove(identifier)
+            favorites = [f for f in app.settings.get('favorite_microphones')
+                         if isinstance(f, dict)]
+            if is_favorite(device):
+                favorites = [f for f in favorites
+                             if not names_match(f.get('name') or '', device['name'])]
             else:
-                favorites.append(identifier)
-
+                favorites.append(create_device_identifier(device)._asdict())
             app.settings.set('favorite_microphones', favorites)
             app.update_icon_menu()
         return handler
 
-    # Create menu items
-    select_items = []
-    favorite_items = []
-
-    for device in devices:
-        identifier = create_device_identifier(device)._asdict()
-        is_favorite = identifier in favorite_identifiers
-        is_selected = identifier == current_identifier
-        is_default = device['id'] == default_device_id
-
-        star_prefix = "💫 " if is_favorite else "    "
-        default_prefix = "🎙️ " if is_default else "    "
-        combined_prefix = default_prefix if is_default else star_prefix
-
-        select_items.append(
-            pystray.MenuItem(
-                f"{combined_prefix}{device['name']}",
-                make_mic_handler(device),
-                checked=lambda item, dev=device: create_device_identifier(dev)._asdict() == current_identifier
-            )
+    def make_select_item(device: Dict[str, any]) -> pystray.MenuItem:
+        prefix = ("💫 " if is_favorite(device) else "") + \
+                 ("🎙️ " if device['id'] == default_device_id else "")
+        return pystray.MenuItem(
+            f"{prefix}{device['name']}",
+            make_mic_handler(device),
+            checked=lambda item, dev=device: is_selected(dev)
         )
 
-        favorite_items.append(
-            pystray.MenuItem(
-                f"{default_prefix}{device['name']}",
-                make_favorite_handler(device),
-                checked=lambda item, dev=device: create_device_identifier(dev)._asdict() in favorite_identifiers
-            )
-        )
+    # Favorites pinned above the rest (alphabetical within each group)
+    favorite_devices = [d for d in devices if is_favorite(d)]
+    other_devices = [d for d in devices if not is_favorite(d)]
+    select_items = [make_select_item(d) for d in favorite_devices]
+    if favorite_devices and other_devices:
+        select_items.append(pystray.Menu.SEPARATOR)
+    select_items.extend(make_select_item(d) for d in other_devices)
 
-    menu_items = [
+    favorite_items = [
+        pystray.MenuItem(
+            device['name'],
+            make_favorite_handler(device),
+            checked=lambda item, dev=device: is_favorite(dev)
+        )
+        for device in devices
+    ]
+
+    return [
         pystray.MenuItem(
             'Select Device',
             pystray.Menu(*select_items)
@@ -112,8 +123,6 @@ def create_microphone_menu(app):
         ),
         pystray.MenuItem('Refresh Devices', lambda icon, item: app.refresh_microphones())
     ]
-
-    return menu_items
 
 def create_stt_provider_menu(app):
     """Creates menu for STT provider and model selection"""
