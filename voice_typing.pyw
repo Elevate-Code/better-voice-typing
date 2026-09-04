@@ -372,24 +372,29 @@ class VoiceTypingApp:
             else:
                 self._stop_recording()
 
-    def _stop_recording(self) -> None:
-        """Helper method to handle recording stop logic"""
+    def _stop_recording(self, expected_gen: Optional[int] = None) -> None:
+        """Stop the current dictation and hand it to processing.
+
+        Idempotent: a second caller for the same recording (a caps press
+        racing a watchdog auto-stop) returns without touching the snapshot
+        the first caller is already transcribing. Callers that decide to
+        stop asynchronously (the watchdog) pass the generation they observed,
+        so a stop meant for a finished recording can't kill the one that
+        replaced it in the meantime."""
         with self._toggle_lock:
-            self.recording = False
+            if not self.recording:
+                return
             gen = self._recording_generation
+            if expected_gen is not None and expected_gen != gen:
+                self.logger.info("Ignoring stale stop request for a superseded recording")
+                return
+            self.recording = False
             self.recorder.stop()
             self.logger.info("Recording stopped")
 
             # Detach the streaming session from app state; from here it either
             # travels with this recording's processing or gets aborted
             stream_session, self._streaming_session = self._streaming_session, None
-
-            # If a new recording started while we were stopping, bail out entirely
-            if gen != self._recording_generation:
-                if stream_session is not None:
-                    stream_session.abort()
-                self.logger.info("Skipping processing — superseded by new recording")
-                return
 
             if self.recorder.was_auto_stopped():
                 if stream_session is not None:
@@ -427,14 +432,21 @@ class VoiceTypingApp:
             self.status_manager.set_status(AppStatus.PROCESSING)
             self.process_audio(stream_session)
 
-    def _flush_chunk(self) -> None:
+    def _flush_chunk(self, expected_gen: Optional[int] = None) -> None:
         """Seal the current chunk, queue it for transcription, resume recording.
 
         The gap between stop and restart is the quick-restart cost the session
         design accepts (~0.3s mic-only, up to ~1-2s in meeting mode where the
-        loopback thread is rejoined and the 2-channel file composed)."""
+        loopback thread is rejoined and the 2-channel file composed).
+
+        expected_gen: asynchronous callers (the max-duration watchdog) pass
+        the generation they saw; if a caps press already sealed that chunk,
+        the request is dropped instead of producing a near-empty extra one."""
         with self._toggle_lock:
             if not (self.recording and self._session_active):
+                return
+            if expected_gen is not None and expected_gen != self._recording_generation:
+                self.logger.info("Ignoring stale flush request; the chunk was already sealed")
                 return
             # Acknowledge the caps press right away — the stop/restart and
             # chunk analysis below can take a moment, and the user needs to
@@ -474,16 +486,25 @@ class VoiceTypingApp:
                         pass
 
     def _end_session(self, auto_stopped: bool = False,
-                     error: Optional[str] = None) -> None:
+                     error: Optional[str] = None,
+                     expected_gen: Optional[int] = None) -> None:
         """End the conversation session, discarding the unflushed tail.
 
         Audio since the last flush is dropped by design (press caps to flush
         before ending if you want it); chunks already queued keep delivering
         in order. Exception: when a recording ERROR ends the session (mic
         unplugged, driver failure), the user didn't choose to end it, so the
-        tail is salvaged into the queue instead of discarded."""
+        tail is salvaged into the queue instead of discarded.
+
+        expected_gen: asynchronous callers (the watchdog) pass the generation
+        they saw. A flush or a new session in the meantime restarts capture,
+        so a stale end request is dropped; if the fault persists the watchdog
+        sees it again on its next tick."""
         with self._toggle_lock:
             if not self._session_active:
+                return
+            if expected_gen is not None and expected_gen != self._recording_generation:
+                self.logger.info("Ignoring stale end-session request for a superseded capture")
                 return
             self._session_active = False
             self.recording = False
@@ -770,22 +791,32 @@ class VoiceTypingApp:
         if token != self._watchdog_token:
             return
 
+        # Every action below runs on its own thread and takes the toggle lock
+        # later; it carries the generation seen now so that, if a caps press
+        # stops/flushes/restarts first, the stale action is dropped instead of
+        # double-processing or stopping the recording that replaced this one
+        gen = self._recording_generation
+
         if self.recording and self.recorder.error is not None:
             # Device/stream failure (mic unplugged, driver error) — unlike the
             # silent-start case below, audio already captured must be kept
             if self._session_active:
                 threading.Thread(target=self._end_session,
-                                 kwargs={'error': self.recorder.error}, daemon=True).start()
+                                 kwargs={'error': self.recorder.error, 'expected_gen': gen},
+                                 daemon=True).start()
             else:
-                threading.Thread(target=self._stop_recording, daemon=True).start()
+                threading.Thread(target=self._stop_recording,
+                                 kwargs={'expected_gen': gen}, daemon=True).start()
             return
 
         if self.recording and self.recorder.was_auto_stopped():
             if self._session_active:
                 threading.Thread(target=self._end_session,
-                                 kwargs={'auto_stopped': True}, daemon=True).start()
+                                 kwargs={'auto_stopped': True, 'expected_gen': gen},
+                                 daemon=True).start()
             else:
-                threading.Thread(target=self._stop_recording, daemon=True).start()
+                threading.Thread(target=self._stop_recording,
+                                 kwargs={'expected_gen': gen}, daemon=True).start()
             return
 
         if self.recording and self.recorder.max_duration_reached:
@@ -793,9 +824,11 @@ class VoiceTypingApp:
                 # Roll into a new chunk instead of ending the session
                 self.recorder.max_duration_reached = False
                 self.logger.warning("Max chunk duration reached; auto-flushing")
-                threading.Thread(target=self._flush_chunk, daemon=True).start()
+                threading.Thread(target=self._flush_chunk,
+                                 kwargs={'expected_gen': gen}, daemon=True).start()
             else:
-                threading.Thread(target=self._stop_recording, daemon=True).start()
+                threading.Thread(target=self._stop_recording,
+                                 kwargs={'expected_gen': gen}, daemon=True).start()
                 return
 
         if self.recording:
@@ -962,30 +995,48 @@ class VoiceTypingApp:
             return False, describe_transcription_error(e)
 
     def retry_transcription(self) -> None:
-        """Retry transcription of last failed recording"""
-        # Capture the path now: self.last_recording can be cleared/replaced by
-        # a new recording while the retry is in flight
-        recording_path = self.last_recording
-        if not recording_path:
-            return
+        """Retry transcription of the last failed recording; the result goes
+        to the clipboard rather than the cursor.
 
-        def retry_thread():
-            self.status_manager.set_status(AppStatus.PROCESSING)
-            success, result = self._attempt_transcription(recording_path)
+        Runs as the tracked processing job: starting a new recording cancels
+        it exactly like an in-flight dictation, and a retry that outlives its
+        generation discards its result instead of copying text, rewriting
+        history, or repainting the status over the newer recording."""
+        with self._toggle_lock:
+            # Capture the path now: self.last_recording can be cleared/replaced
+            # by a new recording while the retry is in flight
+            recording_path = self.last_recording
+            if not recording_path:
+                return
+            if self.recording:
+                self.logger.info("Retry ignored: a recording is in progress")
+                return
+            if self.processing_thread and self.processing_thread.is_alive():
+                self.logger.info("Retry ignored: a transcription is already in progress")
+                return
+            gen = self._recording_generation
+            self.cancel_flag.clear()
 
-            if success and result:
-                self.history.add(result)
-                pyperclip.copy(result)  # Copy to clipboard instead of direct insertion
-                self.status_manager.set_status(AppStatus.IDLE)
-                self.ui_feedback.show_warning("✅ Transcription copied to clipboard", 3000)
-                # Update the menu to reflect the new transcription in history
-                if self.update_icon_menu:
-                    self.update_icon_menu()
-            else:
-                # Keep the reason (quota, key, network) visible on the retry
-                self._report_failure(result, prefix="🔄 Retry failed — ")
+            def retry_thread() -> None:
+                self.status_manager.set_status(AppStatus.PROCESSING)
+                success, result = self._attempt_transcription(recording_path)
+                if self._is_stale(gen):
+                    self.logger.info("Retry result discarded (superseded by a newer recording)")
+                    return
+                if success and result:
+                    self.history.add(result)
+                    pyperclip.copy(result)  # Copy to clipboard instead of direct insertion
+                    self.status_manager.set_status(AppStatus.IDLE)
+                    self.ui_feedback.show_warning("✅ Transcription copied to clipboard", 3000)
+                    # Update the menu to reflect the new transcription in history
+                    if self.update_icon_menu:
+                        self.update_icon_menu()
+                else:
+                    # Keep the reason (quota, key, network) visible on the retry
+                    self._report_failure(result, prefix="🔄 Retry failed — ")
 
-        threading.Thread(target=retry_thread, daemon=True).start()
+            self.processing_thread = threading.Thread(target=retry_thread, daemon=True)
+            self.processing_thread.start()
 
     def toggle_clean_transcription(self) -> None:
         self.clean_transcription_enabled = not self.clean_transcription_enabled
@@ -1129,6 +1180,13 @@ class VoiceTypingApp:
     def _cancel_recording(self) -> None:
         """Stop and discard the current recording, serialized against hotkey toggles."""
         with self._toggle_lock:
+            if not self.recording:
+                return
+            # Retire the watchdog chain here, not just via recording=False: a
+            # tick between the click (which already showed IDLE) and this lock
+            # would reassert the recording status, and nothing after the chain
+            # exits would ever restore IDLE
+            self._watchdog_token += 1
             self.recording = False
             if self._streaming_session is not None:
                 self._streaming_session.abort()
@@ -1137,6 +1195,7 @@ class VoiceTypingApp:
                 self.recorder.stop()
             except Exception:
                 self.logger.error("Error stopping recorder", exc_info=True)
+            self.status_manager.set_status(AppStatus.IDLE)
 
     def _start_streaming_session(self):
         """Open a realtime transcription session, or None if unavailable.
