@@ -15,7 +15,7 @@ to preserve chunk order. They still must not call back into the queue.
 import logging
 import threading
 import time
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 logger = logging.getLogger('voice_typing')
 
@@ -31,20 +31,25 @@ class ChunkQueue:
                  transcribe_fn: Callable[[str], str],
                  on_result: Callable[[int, str, str], None],
                  on_retrying: Callable[[int], None],
-                 on_failed: Callable[[int, str], None],
+                 on_failed: Callable[[int, str, Optional[BaseException]], None],
                  on_pending: Callable[[int], None],
-                 on_drained: Callable[[List[str]], None]) -> None:
+                 on_drained: Callable[[List[str]], None],
+                 retry_delay: float = RETRY_DELAY_S) -> None:
         """
         Args:
             transcribe_fn: (path) -> transcript text; raises on failure.
             on_result: (chunk_index, text, path) — delivered strictly in order.
             on_retrying: (chunk_index) — first attempt failed, retry starting.
-            on_failed: (chunk_index, path) — chunk permanently failed; its file
-                is kept on disk for manual retry.
+            on_failed: (chunk_index, path, error) — chunk permanently failed;
+                its file is kept on disk for manual retry. `error` is the last
+                exception raised, so callers can explain *why* it failed.
             on_pending: (count) — number of undelivered chunks changed.
             on_drained: (failed_paths) — queue closed and fully delivered.
+            retry_delay: seconds between the failed first attempt and the
+                retry (tests inject 0).
         """
         self._transcribe = transcribe_fn
+        self._retry_delay = retry_delay
         self._on_result = on_result
         self._on_retrying = on_retrying
         self._on_failed = on_failed
@@ -109,6 +114,7 @@ class ChunkQueue:
                 chunk['state'] = _DONE
                 break
             except Exception as e:
+                chunk['error'] = e
                 if self._cancelled:
                     chunk['state'] = _FAILED
                     break
@@ -118,7 +124,7 @@ class ChunkQueue:
                         self._on_retrying(chunk['index'])
                     except Exception:
                         logger.exception("Error in retrying callback")
-                    time.sleep(RETRY_DELAY_S)
+                    time.sleep(self._retry_delay)
                     if self._cancelled:
                         # Cancelled during the backoff; don't burn an API call
                         chunk['state'] = _FAILED
@@ -153,7 +159,8 @@ class ChunkQueue:
                     if chunk['state'] == _DONE:
                         self._on_result(chunk['index'], chunk['text'], chunk['path'])
                     else:
-                        self._on_failed(chunk['index'], chunk['path'])
+                        self._on_failed(chunk['index'], chunk['path'],
+                                        chunk.get('error'))
                 except Exception:
                     logger.exception(f"Error delivering chunk {chunk['index']}")
             try:

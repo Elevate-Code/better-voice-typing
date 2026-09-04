@@ -21,9 +21,16 @@ uv pip install -r requirements.txt        # after adding a locked pin to require
 # Quick syntax check of edited files
 .\.venv\Scripts\python.exe -m py_compile voice_typing.pyw modules\*.py services\*.py
 
-# Setup/update-flow test harness (no pytest suite; tests are manual scripts)
+# Unit tests (pytest; see tests/README.md for what belongs there)
+uv pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pytest
+
+# Manual tools: real-keyboard hotkey check, setup/update-flow harness
+.\.venv\Scripts\python.exe tests\manual\keyboard_test.py
 cd tests\setup_test; .\test_setup_simple.ps1
 ```
+
+Tests cover only brittle, load-bearing contracts (hotkey message sequences, chunk ordering/retry/cancel, error classification) — no coverage target. Hardware, network, Tk, and the global keyboard hook are never touched; if a change can't be tested without patching internals, add an injectable seam (clock, delay, callable) instead.
 
 Only one app instance can run (named mutex in `modules/single_instance.py`). The `.venv\Scripts\pythonw.exe` shim plus the real interpreter appear as two `pythonw` processes for one instance — not a duplicate-instance bug.
 
@@ -31,11 +38,12 @@ Only one app instance can run (named mutex in `modules/single_instance.py`). The
 
 `voice_typing.pyw` owns the `VoiceTypingApp` orchestration: hotkey listener, recording lifecycle, the conversation-session machinery (`_flush_chunk` / `_end_session` / `_make_chunk_queue`), a 100ms Tk-thread watchdog (`_check_recorder_status`), and the processing pipeline (analyze → transcribe → optional LLM clean → paste). Everything else is a module with one job:
 
+- `modules/hotkey.py` — `CapsLockHotkey`: pure state machine turning raw keyboard-hook messages (auto-repeat, Ctrl+Caps chord, injected keystrokes, lost key-ups) into one `TOGGLE` per physical press. The pynput `win32_event_filter` in `voice_typing.pyw` is a thin adapter over it; put new hotkey rules here with a test, never in the adapter.
 - `modules/recorder.py` — `AudioRecorder`: mic capture thread writing `temp_audio.wav`. Flags consumed by the watchdog: `auto_stopped` (initial silence), `error` (device/stream failure — callers must keep captured audio), `max_duration_reached`. Meeting mode adds `modules/loopback_recorder.py` (WASAPI system-audio capture via `soundcard`), composed into a 2-channel WAV on stop.
 - `modules/transcribe.py` — provider router. Recordings self-describe: 2 channels = meeting, WAV comment `voice_typing:phone` = phone (markers survive snapshots/retries/restarts); otherwise dictation via `stt_provider` setting, where `null` = auto (ElevenLabs if `ELEVENLABS_API_KEY` is set, else OpenAI). Transcriber instances in `services/` are cached by full config tuple; provider SDK imports are lazy for startup speed.
-- `modules/chunk_queue.py` — `ChunkQueue`: session chunks transcribe concurrently but deliver strictly in order at the cursor; one auto-retry, then the file is kept for tray retry. Lock order is documented in the file (delivery lock → state lock); callbacks fire outside the state lock.
+- `modules/chunk_queue.py` — `ChunkQueue`: session chunks transcribe concurrently but deliver strictly in order at the cursor; one auto-retry, then the file is kept for tray retry. Lock order is documented in the file (delivery lock → state lock); callbacks fire outside the state lock. `retry_delay` is injectable for tests.
 - `modules/settings.py` — `Settings` singleton; also loads `.env` at import (key-presence decisions happen in migrations and the provider router). One-shot migrations run at startup.
-- `modules/ui.py` + `modules/status_manager.py` + `modules/tray.py` — recording indicator overlay(s), status state machine, pystray menu. tkinter is not thread-safe: all UI work must be marshalled through `UIFeedback` (queue → Tk main loop). Mid-recording warnings must use `UIFeedback.set_recording_note`, not `show_warning` — the pulse/elapsed-time ticker overwrites the warning overlay.
+- `modules/ui.py` + `modules/status_manager.py` + `modules/tray.py` — recording indicator overlay(s), status state machine, pystray menu. tkinter is not thread-safe: all UI work must be marshalled through `UIFeedback` (queue → Tk main loop). Mid-recording warnings must use `UIFeedback.set_recording_note`, not `show_warning` — the pulse/elapsed-time ticker overwrites the warning overlay. When reporting a retryable error, call `status_manager.set_status(ERROR, …)` *before* `show_error_with_retry(…)`: both repaint the label in UI-queue order and only the overlay carries the hint and the "click to retry" line.
 - `modules/output_providers.py` — pluggable paste strategies; users can drop custom providers in `Documents\VoiceTyping\plugins\`.
 - `services/openai_realtime_stt.py` — streaming dictation (beta) over an OpenAI Realtime websocket while recording; any failure falls back to the batch upload (the WAV is always written in parallel).
 - `check_update.py` — self-updater: downloads the latest GitHub release zipball and replaces app files, preserving `.env` and settings.
