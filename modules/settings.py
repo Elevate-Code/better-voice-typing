@@ -171,7 +171,7 @@ class Settings:
             'ui_indicator_size': 'normal',  # 'normal', 'mini'
             'ui_indicator_all_displays': True,  # Show indicator on all monitors
             'tray_pinned_exe': None,  # Executable whose tray icon the app already promoted out of the overflow
-            'sounds_enabled': False,  # Soft cue when recording starts/stops
+            'sounds_enabled': False,  # Hidden (not in the UI): start/stop cues; output-device start-up latency swallowed them in testing
             'setup_completed': None,  # App version whose first-run setup was finished; null = show it
 
             # Logging

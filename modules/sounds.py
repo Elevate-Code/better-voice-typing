@@ -1,4 +1,7 @@
-"""Soft start/stop cues for recording (off by default; ``sounds_enabled``).
+"""Soft start/stop cues for recording (``sounds_enabled``; off by default and
+not exposed in the UI: on 2026-09-04 the default output device — a virtual
+mixer — swallowed the first ~300 ms of every clip, so the cues were inaudible
+or clipped. Left in for users who set the key in settings.json).
 
 The two tones are synthesized once with numpy and played from memory through
 winsound, so there are no audio assets to license or bundle and playback

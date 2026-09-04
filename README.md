@@ -58,7 +58,7 @@ Toggle **Streaming Dictation** under Settings to transcribe *while you speak* ov
 Left-click the tray icon (or right-click → **Open Better Voice Typing**) for the main window:
 - **Home**: which provider and microphone are active, the controls, and a button to rerun the first-run setup.
 - **History**: your recent transcriptions with timestamps; copy any of them, or retry the last recording.
-- **General / Dictation / Conversation / Indicator / Advanced**: every setting — API keys (with a Test button), microphone with a live level meter, start at sign-in, sounds, language, provider and model, custom/local server, streaming, silent-start timeout, maximum recording length, optional LLM cleanup, Meeting/Phone options, indicator position and size, log options, updates.
+- **General / Dictation / Conversation / Indicator / Advanced**: every setting — API keys (with a Test button), microphone with a live level meter, start at sign-in, language, provider and model, custom/local server, streaming, silent-start timeout, maximum recording length, optional LLM cleanup, Meeting/Phone options, indicator position and size, log options, updates.
 
 The right-click tray menu keeps the quick actions: Copy / Retry Last Transcription, Recent Transcriptions, Microphone, Meeting/Phone mode toggles, Quick Settings (cleanup, streaming, silent-start, indicator, provider, and the settings/.env/logs files), Check for Updates, Restart, Exit.
 
