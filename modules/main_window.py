@@ -506,6 +506,24 @@ def _bind_spin(app, key: str, lo: float, hi: float, step: float = 1.0, decimals:
     return spin
 
 
+def _sounds_control(app) -> QWidget:
+    """Sounds toggle plus a Test button (plays start then stop)."""
+    box = QWidget()
+    hl = QHBoxLayout(box)
+    hl.setContentsMargins(0, 0, 0, 0)
+    check = _bind_check(app, 'sounds_enabled')
+    check.stateChanged.connect(lambda s: play('start') if s else None)
+    test = QPushButton('Test')
+
+    def test_both() -> None:
+        play('start')
+        QTimer.singleShot(700, lambda: play('stop'))
+    test.clicked.connect(test_both)
+    hl.addWidget(test)
+    hl.addWidget(check)
+    return box
+
+
 def _combo(options: List[Tuple[str, Any]], current: Any, on_change: Callable[[Any], None]) -> QComboBox:
     combo = QComboBox()
     for label, value in options:
@@ -609,9 +627,7 @@ class GeneralPage(Page):
             self._startup_worker = _Worker()  # PowerShell takes a moment; keep the UI responsive
             box.stateChanged.connect(lambda s: self._startup_worker.run(lambda: startup.set_enabled(bool(s))))
             card.add_row('Start when I sign in to Windows', '', box)
-        sounds = _bind_check(app, 'sounds_enabled')
-        sounds.stateChanged.connect(lambda s: play('start') if s else None)
-        card.add_row('Sounds', 'A soft cue when a recording starts and stops.', sounds)
+        card.add_row('Sounds', 'A soft cue when a recording starts and stops.', _sounds_control(app))
         card.add_row('Language', 'Spoken language, for the transcription models.',
                      _combo(LANGUAGES, app.settings.get('stt_language'),
                             lambda v: app.settings.set('stt_language', v)))
@@ -905,9 +921,7 @@ class SetupWizard(QWidget):
         card.add_row('Cancel', 'Click the red indicator to discard a recording.', None)
         card.add_row('Tray icon', f'Look for the 🎤 icon next to the clock — that is where {APP_NAME} lives. '
                      'Windows sometimes hides new icons behind the ^ arrow; drag it out to keep it visible.', None)
-        sounds = _bind_check(app, 'sounds_enabled')
-        sounds.stateChanged.connect(lambda s: play('start') if s else None)
-        card.add_row('Sounds', 'Play a soft cue when a recording starts and stops.', sounds)
+        card.add_row('Sounds', 'Play a soft cue when a recording starts and stops.', _sounds_control(app))
         p3.body.addWidget(card)
         p3.finish()
         self.stack.addWidget(p3)

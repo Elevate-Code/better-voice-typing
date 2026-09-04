@@ -19,7 +19,7 @@ _cache: Dict[str, bytes] = {}
 _lock = threading.Lock()
 
 
-def _tone(notes: List[Tuple[float, float]], gap_s: float = 0.02, volume: float = 0.18) -> bytes:
+def _tone(notes: List[Tuple[float, float]], gap_s: float = 0.02, volume: float = 0.3) -> bytes:
     """WAV bytes for a sequence of (frequency_hz, duration_s) sine notes with
     a gentle attack/release envelope so they don't click."""
     import numpy as np
@@ -53,7 +53,7 @@ def _cue(name: str) -> Optional[bytes]:
                 else:
                     data = _tone([(880.0, 0.07), (587.0, 0.12)])
             except Exception:
-                logger.debug("Could not synthesize sound cue", exc_info=True)
+                logger.warning("Could not synthesize sound cue", exc_info=True)
                 return None
             _cache[name] = data
     return data
@@ -74,7 +74,7 @@ def play(name: str) -> None:
         try:
             winsound.PlaySound(data, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
         except Exception:
-            logger.debug("Sound cue playback failed", exc_info=True)
+            logger.warning("Sound cue playback failed", exc_info=True)
     threading.Thread(target=go, name='sound-cue', daemon=True).start()
 
 
