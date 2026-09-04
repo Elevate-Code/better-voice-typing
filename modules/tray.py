@@ -4,7 +4,7 @@ import ctypes
 import ctypes.wintypes
 import time
 import logging
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import pyperclip
 import pystray
@@ -27,6 +27,31 @@ def create_tray_icon(icon_path: str) -> Image.Image:
     current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     icon_path = os.path.join(current_dir, icon_path)
     return Image.open(icon_path)
+
+UI_POSITIONS = [
+    ('Top Left', 'top-left'), ('Top Center', 'top-center'), ('Top Right', 'top-right'),
+    ('Bottom Left', 'bottom-left'), ('Bottom Center', 'bottom-center'),
+    ('Bottom Right', 'bottom-right'),
+]
+
+
+def make_position_items(get_position: Callable[[], Optional[str]],
+                        set_position: Callable[[str], None]) -> list:
+    """Radio-style menu items for the indicator position.
+
+    pystray validates action signatures strictly: an action must take
+    exactly (icon, item) — a lambda with an extra defaulted parameter is
+    rejected at construction and the whole icon fails to build. Bind the
+    position with a closure factory instead."""
+    def item(label: str, pos: str) -> pystray.MenuItem:
+        def activate(icon, item) -> None:
+            set_position(pos)
+
+        def is_checked(item) -> bool:
+            return get_position() == pos
+        return pystray.MenuItem(label, activate, checked=is_checked)
+    return [item(label, pos) for label, pos in UI_POSITIONS]
+
 
 def create_copy_menu(app):
     """Creates dynamic menu of recent transcriptions"""
@@ -301,18 +326,8 @@ class TrayIconManager:
             app.ui_feedback.set_position(new_pos)
             self.update_menu()
 
-        UI_POSITIONS = [
-            ('Top Left', 'top-left'), ('Top Center', 'top-center'), ('Top Right', 'top-right'),
-            ('Bottom Left', 'bottom-left'), ('Bottom Center', 'bottom-center'),
-            ('Bottom Right', 'bottom-right'),
-        ]
-
-        def position_item(label: str, pos: str) -> pystray.MenuItem:
-            return pystray.MenuItem(
-                label,
-                lambda icon, item, pos=pos: change_ui_position(pos),
-                checked=lambda item, pos=pos: app.settings.get('ui_indicator_position') == pos
-            )
+        position_items = make_position_items(
+            lambda: app.settings.get('ui_indicator_position'), change_ui_position)
 
         def change_ui_size(new_size: str):
             app.settings.set('ui_indicator_size', new_size)
@@ -400,7 +415,7 @@ class TrayIconManager:
                                 checked=lambda item: app.settings.get('ui_indicator_all_displays')
                             ),
                             pystray.Menu.SEPARATOR,
-                            *[position_item(label, pos) for label, pos in UI_POSITIONS],
+                            *position_items,
                         )
                     ),
                     pystray.MenuItem(
