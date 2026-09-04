@@ -68,10 +68,14 @@ def play(name: str) -> None:
     data = _cue(name)
     if data is None:
         return
-    try:
-        winsound.PlaySound(data, winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-    except Exception:
-        logger.debug("Sound cue playback failed", exc_info=True)
+    # winsound cannot play from memory asynchronously (RuntimeError), so the
+    # blocking call runs on its own short-lived thread instead
+    def go() -> None:
+        try:
+            winsound.PlaySound(data, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
+        except Exception:
+            logger.debug("Sound cue playback failed", exc_info=True)
+    threading.Thread(target=go, name='sound-cue', daemon=True).start()
 
 
 def play_if_enabled(settings, name: str) -> None:

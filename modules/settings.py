@@ -5,7 +5,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from modules.fileutil import backup_path, read_json_with_backup, write_json_atomic
 from modules.paths import APP_DIR, INSTALL_DIR, USER_DATA_DIR
@@ -53,7 +53,11 @@ def _load_env_files() -> None:
                 startup_notes.append(f"Created API keys file from template at {ENV_FILE}")
     except OSError as e:
         startup_notes.append(f"Could not set up the API keys file: {e}")
-    load_dotenv(ENV_FILE, override=True)
+    # Non-empty values in the user file win over same-named machine variables;
+    # empty template entries must not blank out a key set in the environment
+    for name, value in dotenv_values(ENV_FILE).items():
+        if value:
+            os.environ[name] = value
     load_dotenv(_LEGACY_ENV_FILE)
 
 

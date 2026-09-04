@@ -87,7 +87,7 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 | `clipboard_restore_delay_ms` | How long after pasting to wait before restoring your previous clipboard contents. Increase if slow apps paste your old clipboard instead of the transcript. | `300` | `100` to `1000` |
 
 ## Technical Details
-- Minimal UI built with Python tkinter
+- Small Qt (PySide6) UI: a recording indicator, a tray icon and a settings window
 - Multi-provider Speech-to-Text support: ElevenLabs Scribe, OpenAI GPT-4o models, Whisper, and custom local/remote servers
 - Extensible architecture for adding new STT providers (Azure, local models, etc.)
 - Audio is uploaded as FLAC (lossless, roughly half the size of WAV) to reduce latency and stay under API upload limits

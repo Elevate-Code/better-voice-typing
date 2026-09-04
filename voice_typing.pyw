@@ -1161,15 +1161,10 @@ if __name__ == "__main__":
     if mutex is None:
         # Another instance is already running; tell the user and bail out
         try:
-            import tkinter as tk
-            from tkinter import messagebox
-            root = tk.Tk()
-            root.withdraw()
-            messagebox.showwarning(
-                "Voice Typing",
-                "Voice Typing is already running.\nCheck the system tray for the microphone icon."
-            )
-            root.destroy()
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "Better Voice Typing is already running.\nLook for the microphone icon next to the clock.",
+                "Better Voice Typing", 0x40)  # MB_ICONINFORMATION
         except Exception:
             pass
         sys.exit(0)

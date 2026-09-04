@@ -44,14 +44,20 @@ class MicMonitor:
                 if rms >= SPEECH_RMS:
                     self.heard_speech = True
 
+        stream = None
         try:
-            self._stream = sd.InputStream(device=self.device_id, channels=1,
-                                          blocksize=2048, callback=callback)
-            self._stream.start()
+            stream = sd.InputStream(device=self.device_id, channels=1,
+                                    blocksize=2048, callback=callback)
+            stream.start()
+            self._stream = stream
         except Exception as e:
             logger.warning(f"Mic test could not open device {self.device_id}: {e}")
             self.error = str(e)
-            self._stream = None
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
 
     def stop(self) -> None:
         stream, self._stream = self._stream, None

@@ -234,8 +234,9 @@ class KeysPanel(Card):
             self._status[name].setObjectName('muted')
             self._status[name].style().polish(self._status[name])
 
-    def _save(self, name: str) -> None:
-        value = self._edits[name].text().strip()
+    def _save(self, name: str, value: Optional[str] = None) -> None:
+        if value is None:
+            value = self._edits[name].text().strip()
         current = os.environ.get(name, '')
         if value == current or (not value and is_placeholder(current)):
             return
@@ -262,7 +263,7 @@ class KeysPanel(Card):
             if isinstance(result, tuple):
                 ok, message = result
                 if ok:
-                    self._save(name)
+                    self._save(name, key)  # the key that was validated, not the field's current text
                 self._set_status(name, message, ok=ok)
             else:
                 self._set_status(name, f'Test failed: {result}', ok=False)
@@ -297,7 +298,7 @@ class MicPanel(QWidget):
         self.combo.setMinimumWidth(320)
         self.combo.currentIndexChanged.connect(self._chosen)
         refresh = QPushButton('Refresh')
-        refresh.clicked.connect(self.reload)
+        refresh.clicked.connect(self.rescan)
         hl.addWidget(self.combo, 1)
         hl.addWidget(refresh)
         vl.addLayout(hl)
@@ -312,6 +313,15 @@ class MicPanel(QWidget):
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._tick)
         self._loading = False
+
+    def rescan(self) -> None:
+        """Reinitialize the audio backend so hot-plugged devices appear; the
+        monitor's stream must be closed while that happens."""
+        if self.monitor is not None:
+            self.monitor.stop()
+            self.monitor = None
+        self.app.refresh_microphones()
+        self.reload()
 
     def reload(self) -> None:
         self._loading = True
@@ -380,7 +390,17 @@ class MicPanel(QWidget):
         self.verdict.setText('Say something — the bars should light up as you speak.')
 
     def _tick(self) -> None:
-        if self.monitor is None or self.meter is None:
+        if self.meter is None:
+            return
+        if self.app.recording:
+            if self.monitor is not None:
+                self.monitor.stop()
+                self.monitor = None
+                self.meter.set_level(0.0)
+            self._set_verdict('Recording in progress — the test resumes when it ends.', 'muted')
+            return
+        if self.monitor is None:
+            self._restart_monitor()
             return
         self.meter.set_level(self.monitor.level())
         verdict = self.monitor.verdict()
@@ -586,7 +606,8 @@ class GeneralPage(Page):
         if startup.available():
             box = QCheckBox()
             box.setChecked(startup.is_enabled())
-            box.stateChanged.connect(lambda s: startup.set_enabled(bool(s)))
+            self._startup_worker = _Worker()  # PowerShell takes a moment; keep the UI responsive
+            box.stateChanged.connect(lambda s: self._startup_worker.run(lambda: startup.set_enabled(bool(s))))
             card.add_row('Start when I sign in to Windows', '', box)
         sounds = _bind_check(app, 'sounds_enabled')
         sounds.stateChanged.connect(lambda s: play('start') if s else None)
@@ -631,8 +652,9 @@ class DictationPage(Page):
         card.add_row('Streaming dictation (beta)', 'Transcribe over an OpenAI Realtime connection while you speak, '
                      'so text is ready the moment you stop. Falls back to a normal upload on any problem.',
                      _bind_check(app, 'streaming_dictation', lambda v: self._toggle_via(app.toggle_streaming_dictation, 'streaming_dictation', v)))
-        card.add_row('Silent-start timeout', 'Stop automatically if nothing is heard at the start of a recording.',
-                     _bind_spin(app, 'silent_start_timeout', 0, 60, 0.5, 1, ' s', none_at_zero=True))
+        silent = _bind_spin(app, 'silent_start_timeout', 0, 60, 0.5, 1, ' s', none_at_zero=True)
+        silent.valueChanged.connect(lambda v: setattr(app.recorder, 'silent_start_timeout', None if v == 0 else float(v)))
+        card.add_row('Silent-start timeout', 'Stop automatically if nothing is heard at the start of a recording.', silent)
         card.add_row('Maximum recording length', 'Stop and transcribe automatically after this long.',
                      _bind_spin(app, 'max_recording_duration', 0, 180, 1, 1, ' min', none_at_zero=True, scale=60))
         self.body.addWidget(card)
@@ -721,8 +743,10 @@ class ConversationPage(Page):
 
     def _set_mode(self, key: str, wanted: bool) -> None:
         if bool(self.app.settings.get(key)) != wanted:
-            (self.app.toggle_meeting_mode if key == 'meeting_mode' else self.app.toggle_phone_mode)()
-        self.refresh()
+            toggle = self.app.toggle_meeting_mode if key == 'meeting_mode' else self.app.toggle_phone_mode
+            # Ending a live session joins recorder threads; keep that off the UI thread
+            threading.Thread(target=toggle, daemon=True).start()
+        QTimer.singleShot(400, self.refresh)
 
     def refresh(self) -> None:
         for box, key in ((self.meeting, 'meeting_mode'), (self.phone, 'phone_mode')):

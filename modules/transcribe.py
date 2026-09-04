@@ -1,5 +1,6 @@
 """Multi-provider Speech-to-Text module with Strategy pattern"""
 import logging
+import os
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -41,7 +42,8 @@ def _tag_provider(provider: str) -> Iterator[None]:
 def _get_transcriber(provider_name: str):
     """
     Factory function to get a transcriber instance based on provider name.
-    Instances are cached per configuration.
+    Instances are cached per configuration, including the API key in use,
+    so a key changed in the settings window takes effect on the next call.
 
     Args:
         provider_name: Name of the provider ('elevenlabs', 'openai', 'custom')
@@ -54,7 +56,7 @@ def _get_transcriber(provider_name: str):
     """
     if provider_name == "elevenlabs":
         language = settings.get('stt_language') or 'en'
-        key = (provider_name, language)
+        key = (provider_name, language, os.environ.get('ELEVENLABS_API_KEY'))
         if key not in _transcriber_cache:
             from services.elevenlabs_stt import ElevenLabsDictationTranscriber
             _transcriber_cache[key] = ElevenLabsDictationTranscriber(language=language)
@@ -62,7 +64,7 @@ def _get_transcriber(provider_name: str):
     elif provider_name == "openai":
         model = settings.get('openai_stt_model') or 'gpt-4o-mini-transcribe'
         language = settings.get('stt_language') or 'en'
-        key = (provider_name, model, language)
+        key = (provider_name, model, language, os.environ.get('OPENAI_API_KEY'))
         if key not in _transcriber_cache:
             from services.openai_stt import OpenAITranscriber
             _transcriber_cache[key] = OpenAITranscriber(model=model, language=language)
@@ -71,7 +73,7 @@ def _get_transcriber(provider_name: str):
         base_url = settings.get('custom_stt_base_url') or 'http://localhost:8000'
         model = settings.get('custom_stt_model') or 'parakeet-tdt-0.6b-v2'
         language = settings.get('stt_language') or 'en'
-        key = (provider_name, base_url, model, language)
+        key = (provider_name, base_url, model, language, os.environ.get('CUSTOM_STT_API_KEY'))
         if key not in _transcriber_cache:
             from services.custom_stt import CustomTranscriber
             _transcriber_cache[key] = CustomTranscriber(base_url=base_url, model=model, language=language)
@@ -104,7 +106,7 @@ def _get_meeting_transcriber():
     """Get the ElevenLabs multichannel transcriber for meeting recordings (cached)."""
     you_label = settings.get('meeting_speaker_you') or 'Me'
     them_label = settings.get('meeting_speaker_them') or 'Them'
-    key = ('elevenlabs_meeting', you_label, them_label)
+    key = ('elevenlabs_meeting', you_label, them_label, os.environ.get('ELEVENLABS_API_KEY'))
     if key not in _transcriber_cache:
         from services.elevenlabs_stt import ElevenLabsMeetingTranscriber
         _transcriber_cache[key] = ElevenLabsMeetingTranscriber(
@@ -122,7 +124,8 @@ def _get_phone_transcriber():
     use_library = bool(settings.get('use_speaker_library'))
     threshold = settings.get('phone_diarization_threshold')
     key = ('elevenlabs_phone', num_speakers, labeled, my_speaker_id,
-           you_label, them_label, use_library, threshold)
+           you_label, them_label, use_library, threshold,
+           os.environ.get('ELEVENLABS_API_KEY'))
     if key not in _transcriber_cache:
         from services.elevenlabs_stt import ElevenLabsDiarizedTranscriber
         _transcriber_cache[key] = ElevenLabsDiarizedTranscriber(

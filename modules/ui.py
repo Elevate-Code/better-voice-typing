@@ -195,6 +195,7 @@ class UIFeedback:
         self._recording_started: Optional[float] = None
         self._recording_note = ''
         self._notice_active = False
+        self._notice_text = ''
 
         self._level_timer = QTimer()
         self._level_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -329,7 +330,9 @@ class UIFeedback:
         """Push the current model (status or notice) into every window."""
         for w in self.indicators:
             if self._notice_active:
-                pass  # notice painted by _show_notice
+                w.color, w.fg, w.text = NOTICE_COLOR, NOTICE_FG, self._notice_text
+                w.show_level = False
+                w.sweep = None
             elif self._status is not None:
                 w.color = self._pulse_color()
                 w.fg = self._status.ui_fg_color
@@ -488,6 +491,10 @@ class UIFeedback:
             self._tick_timer.stop()
             self._stop_animation()
             if error_message:
+                # An error outranks any warning still on screen
+                self._notice_timer.stop()
+                self._notice_active = False
+                self.retry_available = False
                 self._paint_all()
                 self._show_all()
                 self._notice_timer.start(5000)
@@ -504,7 +511,8 @@ class UIFeedback:
         if not self._notice_active:
             for w in self.indicators:
                 w.text = self._status_text
-                w.update()
+                w.refit()  # no-op below the fixed minimum; grows past 99:59
+            self._position_windows()
 
     def set_recording_note(self, note: str) -> None:
         """Short note appended to the recording label (queued-chunk count, a
@@ -532,14 +540,8 @@ class UIFeedback:
         self._notice_timer.stop()
         self._notice_active = True
         self.retry_available = retry
-        text = f"{message}\n🔄 Click to retry" if retry else message
-        for w in self.indicators:
-            w.color = NOTICE_COLOR
-            w.fg = NOTICE_FG
-            w.text = text
-            w.show_level = False
-            w.sweep = None
-            w.refit()
+        self._notice_text = f"{message}\n🔄 Click to retry" if retry else message
+        self._paint_all()
         self._show_all()
         self._notice_timer.start(int(duration_ms))
 

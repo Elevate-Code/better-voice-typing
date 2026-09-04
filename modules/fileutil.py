@@ -58,12 +58,13 @@ def write_json_atomic(path: PathLike, data: Any, *, indent: int = 4,
 
 def write_text_atomic(path: PathLike, text: str) -> None:
     """Replace ``path`` with ``text`` (temp file + fsync + rename), keeping a
-    .bak of the previous content like write_json_atomic."""
+    .bak of the previous content like write_json_atomic. ``text`` is written
+    byte-for-byte (no newline translation), so callers control line endings."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + '.tmp')
     try:
-        with open(tmp, 'w', encoding='utf-8') as f:
+        with open(tmp, 'w', encoding='utf-8', newline='') as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())

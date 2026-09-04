@@ -24,18 +24,16 @@ def _strip_quotes(value: str) -> str:
 
 
 def read_env(path: Path = ENV_FILE) -> Dict[str, str]:
-    """Key/value pairs from the file (unfilled '...' placeholders included)."""
-    values: Dict[str, str] = {}
+    """Key/value pairs from the file, parsed exactly as the app loads them
+    (python-dotenv: quotes and inline comments handled; unfilled '...'
+    placeholders are returned as-is)."""
+    from dotenv import dotenv_values
     try:
-        for line in path.read_text(encoding='utf-8').splitlines():
-            if line.lstrip().startswith('#'):
-                continue
-            m = _LINE.match(line)
-            if m:
-                values[m.group(1)] = _strip_quotes(m.group(2))
-    except OSError:
-        pass
-    return values
+        if not path.exists():
+            return {}
+        return {k: (v or '') for k, v in dotenv_values(path).items()}
+    except Exception:
+        return {}
 
 
 def is_placeholder(value: Optional[str]) -> bool:
@@ -47,23 +45,31 @@ def update_env(changes: Dict[str, str], path: Path = ENV_FILE) -> None:
     """Set (or add) each key; an empty value clears it. Other lines are kept
     verbatim. Also applies the change to os.environ."""
     try:
-        lines: List[str] = path.read_text(encoding='utf-8').splitlines()
+        raw = path.read_bytes().decode('utf-8')  # keep the file's own line endings
     except OSError:
-        lines = []
+        raw = ''
+    eol = '\r\n' if '\r\n' in raw else '\n'
+    lines: List[str] = raw.splitlines()
     pending = dict(changes)
+    seen: set = set()
     out: List[str] = []
     for line in lines:
         m = _LINE.match(line) if not line.lstrip().startswith('#') else None
-        if m and m.group(1) in pending:
-            key = m.group(1)
-            value = pending.pop(key)
+        key = m.group(1) if m else None
+        if key in changes:
+            if key in seen:
+                continue  # a later duplicate would win at load time; drop it
+            seen.add(key)
+            value = pending.pop(key, None)
+            if value is None:
+                continue
             out.append(f'{key}={value}' if value else f'{key}=')
         else:
             out.append(line)
     for key, value in pending.items():
         out.append(f'{key}={value}' if value else f'{key}=')
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, '\n'.join(out) + '\n')
+    write_text_atomic(path, eol.join(out) + eol)
     for key, value in changes.items():
         if value:
             os.environ[key] = value
