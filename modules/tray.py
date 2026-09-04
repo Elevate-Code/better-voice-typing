@@ -87,49 +87,40 @@ def populate_menu(menu: QMenu, items: List[MenuItem]) -> None:
 
 # ---- icon ----------------------------------------------------------------
 
-def dark_taskbar() -> bool:
-    """Windows: is the taskbar/tray dark (so a light glyph is needed)?"""
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
-            value, _ = winreg.QueryValueEx(k, "SystemUsesLightTheme")
-            return int(value) == 0
-    except Exception:
-        return True
+IDLE_TRAY_COLOR = '#2F80ED'  # the app's blue; statuses use their overlay colour
 
 
 def tray_color(ui_color: str, idle: bool) -> str:
-    """Glyph color for a status: idle follows the taskbar theme; active
-    statuses use the overlay color, lightened when it would vanish on a
-    dark taskbar."""
-    dark = dark_taskbar()
+    """Disc colour for a status. The glyph sits on a filled disc (white mic
+    on colour) so it can't be mistaken for Windows' own plain
+    'microphone in use' tray glyph, and stays visible on any taskbar theme."""
     if idle:
-        return '#F2F2F2' if dark else '#1F1F1F'
+        return IDLE_TRAY_COLOR
     c = QColor(ui_color)
-    if dark and c.lightnessF() < 0.3:
-        c = c.lighter(180)
+    if c.lightnessF() < 0.3:
+        c = c.lighter(170)  # very dark overlay colours (indigo) would read as black
     return c.name()
 
 
 def _paint_mic(pixmap: QPixmap, color: str) -> None:
+    """White microphone glyph on a filled disc of ``color``."""
     s = pixmap.width()
     p = QPainter(pixmap)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    col = QColor(color)
-    # Capsule
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(col)
-    cap = QRectF(s * 0.35, s * 0.06, s * 0.30, s * 0.52)
-    p.drawRoundedRect(cap, s * 0.15, s * 0.15)
+    p.setBrush(QColor(color))
+    p.drawEllipse(QRectF(s * 0.02, s * 0.02, s * 0.96, s * 0.96))
+    white = QColor('#FFFFFF')
+    # Capsule
+    p.setBrush(white)
+    p.drawRoundedRect(QRectF(s * 0.39, s * 0.18, s * 0.22, s * 0.38), s * 0.11, s * 0.11)
     # Cradle arc, stem and base
-    pen = QPen(col, max(1.5, s * 0.09), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+    pen = QPen(white, max(1.2, s * 0.075), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    arc = QRectF(s * 0.20, s * 0.22, s * 0.60, s * 0.52)
-    p.drawArc(arc, 180 * 16, 180 * 16)
-    p.drawLine(QPointF(s * 0.5, s * 0.74), QPointF(s * 0.5, s * 0.88))
-    p.drawLine(QPointF(s * 0.34, s * 0.90), QPointF(s * 0.66, s * 0.90))
+    p.drawArc(QRectF(s * 0.28, s * 0.30, s * 0.44, s * 0.38), 180 * 16, 180 * 16)
+    p.drawLine(QPointF(s * 0.5, s * 0.68), QPointF(s * 0.5, s * 0.78))
+    p.drawLine(QPointF(s * 0.40, s * 0.80), QPointF(s * 0.60, s * 0.80))
     p.end()
 
 
