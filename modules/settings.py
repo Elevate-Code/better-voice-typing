@@ -127,7 +127,6 @@ class Settings:
             'log_transcript_text': True,  # Include full transcript text in log files
 
             # Output
-            'output_mode': 'standard',  # Output provider for text insertion
             'clipboard_restore_delay_ms': 300,  # Delay before restoring original clipboard after paste
         }
         self.current_settings: Dict[str, Any] = self.load_settings()
@@ -167,6 +166,7 @@ class Settings:
             'continuous_capture',
             'smart_capture',        # never-implemented feature stub, removed 2026-07
             'google_stt_language',  # Google STT provider removed 2026-07
+            'output_mode',          # output-provider plugins removed 2026-09 (1.0)
         ]
         changes_made = False
         

@@ -45,13 +45,13 @@ Only one app instance can run (named mutex in `modules/single_instance.py`). The
 - `modules/chunk_queue.py` — `ChunkQueue`: session chunks transcribe concurrently but deliver strictly in order at the cursor; one auto-retry, then the file is kept for tray retry. Lock order is documented in the file (delivery lock → state lock); callbacks fire outside the state lock. `retry_delay` is injectable for tests.
 - `modules/settings.py` — `Settings` singleton; also loads `.env` at import (key-presence decisions happen in migrations and the provider router). One-shot migrations run at startup. Settings and history are written through `modules/fileutil.py` (`write_json_atomic`: temp file + fsync + `os.replace`, previous version kept as `.bak`; `read_json_with_backup` recovers from the `.bak`). Never write user JSON with a bare `open(..., 'w')`.
 - `modules/ui.py` + `modules/status_manager.py` + `modules/tray.py` — recording indicator overlay(s), status state machine, pystray menu. tkinter is not thread-safe: all UI work must be marshalled through `UIFeedback` (queue → Tk main loop). Mid-recording warnings must use `UIFeedback.set_recording_note`, not `show_warning` — the pulse/elapsed-time ticker overwrites the warning overlay. When reporting a retryable error, call `status_manager.set_status(ERROR, …)` *before* `show_error_with_retry(…)`: both repaint the label in UI-queue order and only the overlay carries the hint and the "click to retry" line.
-- `modules/output_providers.py` — pluggable paste strategies; users can drop custom providers in `Documents\VoiceTyping\plugins\`.
+- `modules/paste.py` — the one delivery strategy: clipboard + Ctrl+V (pynput) + delayed clipboard restore, serialized by a lock. The pre-1.0 output-provider plugin system is gone by decision; don't reintroduce a plugin folder.
 - `services/openai_realtime_stt.py` — streaming dictation (beta) over an OpenAI Realtime websocket while recording; any failure falls back to the batch upload (the WAV is always written in parallel).
 - `check_update.py` — self-updater: downloads the latest GitHub release zipball and replaces app files, preserving `.env` and settings.
 
 Concurrency invariants in `voice_typing.pyw`: recording start/stop/flush are serialized by `_toggle_lock`; `_recording_generation` stamps snapshot filenames (`temp_audio.wav.N.wav`) so a new recording can't clobber one mid-transcription; `_watchdog_token` ties the poll chain to the recording that started it. The snapshot sweeper must never delete files still referenced by a live `ChunkQueue` (`_recent_queues` registry).
 
-User data (settings.json, logs, history.json, plugins) lives in `Documents\VoiceTyping\`, never in the repo — app updates replace repo files wholesale.
+User data (settings.json, logs, history.json) lives in `Documents\VoiceTyping\`, never in the repo — app updates replace repo files wholesale.
 
 pynput gotcha: `listener.suppress_event()` raises an exception by design — code after it never runs (documented where used in `voice_typing.pyw`).
 

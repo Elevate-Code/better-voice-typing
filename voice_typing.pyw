@@ -19,7 +19,6 @@ from modules.error_messages import (
 )
 from modules.history import TranscriptionHistory
 from modules.hotkey import CapsLockHotkey, HotkeyAction
-from modules.output_providers import initialize_providers
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
 from modules.settings import Settings, api_key_configured
 from modules.transcribe import transcribe_audio, is_conversation_recording
@@ -98,14 +97,6 @@ class VoiceTypingApp:
         self._hotkey = CapsLockHotkey()
         self.clean_transcription_enabled = self.settings.get('clean_transcription')
         self.history = TranscriptionHistory()
-
-        # Initialize output providers and show any plugin errors
-        plugin_errors = initialize_providers()
-        if plugin_errors:
-            # Show first error briefly, log all
-            self.ui_feedback.show_warning(plugin_errors[0], duration_ms=5000)
-            for error in plugin_errors:
-                self.logger.warning(f"Plugin error: {error}")
 
         self.processing_thread: Optional[threading.Thread] = None
         self.cancel_flag = threading.Event()
@@ -626,8 +617,7 @@ class VoiceTypingApp:
             # labeled phone transcripts, where speaker labels reset)
             header = f"--- [chunk {index}] ---\n" if phone else ""
             self.history.add(text)
-            self.ui_feedback.insert_text(prefix + header + text + "\n",
-                                         output_mode=self.settings.get('output_mode'))
+            self.ui_feedback.insert_text(prefix + header + text + "\n")
             if self.update_icon_menu:
                 self.update_icon_menu()
             self.logger.info(f"Chunk {index} delivered ({len(text)} chars)")
@@ -906,8 +896,7 @@ class VoiceTypingApp:
                 if self._is_stale(gen):
                     return
                 self.history.add(result)
-                output_mode = self.settings.get('output_mode')
-                self.ui_feedback.insert_text(result, output_mode=output_mode)
+                self.ui_feedback.insert_text(result)
                 if self.update_icon_menu:
                     self.update_icon_menu()
                 self.status_manager.set_status(AppStatus.IDLE)

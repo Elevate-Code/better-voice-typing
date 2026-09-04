@@ -6,9 +6,10 @@ import tkinter as tk
 from typing import Optional, Callable, Tuple
 
 
+from modules.paste import paste_text
+from modules.settings import Settings
 from modules.status_manager import StatusConfig
 from modules.screen_utils import get_primary_monitor_geometry, get_all_monitor_geometries, MonitorGeometry
-from modules.output_providers import get_output_provider
 
 logger = logging.getLogger('voice_typing')
 
@@ -20,8 +21,6 @@ logger = logging.getLogger('voice_typing')
 UI_QUEUE_POLL_MS = 30
 
 class UIFeedback:
-    pyautogui_lock = threading.Lock()
-
     def __init__(self, position: str = 'top-right', size: str = 'normal', all_displays: bool = False):
         # Store desired position; fallback to default if invalid
         valid_positions = {'top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center'}
@@ -407,15 +406,14 @@ class UIFeedback:
             self._refresh_recording_label()
         self._call_on_ui_thread(impl)
 
-    def insert_text(self, text: str, output_mode: str = 'standard') -> None:
-        """Insert text at the current cursor position using the configured output provider.
-        Thread-safe: runs on the Tk main thread (providers use root.after and the clipboard)."""
-        self._call_on_ui_thread(lambda: self._insert_text_impl(text, output_mode))
+    def insert_text(self, text: str) -> None:
+        """Paste text at the cursor. Thread-safe: runs on the Tk main thread
+        (the clipboard restore is scheduled via root.after)."""
+        self._call_on_ui_thread(lambda: self._insert_text_impl(text))
 
-    def _insert_text_impl(self, text: str, output_mode: str) -> None:
+    def _insert_text_impl(self, text: str) -> None:
         try:
-            provider = get_output_provider(output_mode)
-            provider.insert_text(text, self.pyautogui_lock, self.root.after)
+            paste_text(text, Settings().get('clipboard_restore_delay_ms'), self.root.after)
         except Exception as e:
             logger.error(f"UIFeedback: Error during text insertion: {e}", exc_info=True)
 
