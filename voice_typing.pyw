@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 import subprocess
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple, Union
 import logging
 from pathlib import Path
 import json
@@ -14,7 +14,11 @@ import pyperclip
 
 from modules.chunk_queue import ChunkQueue
 from modules.clean_text import clean_transcription
+from modules.error_messages import (
+    CANCELLED, NO_RECORDING, TranscriptionFailure, describe_transcription_error,
+)
 from modules.history import TranscriptionHistory
+from modules.hotkey import CapsLockHotkey, HotkeyAction
 from modules.output_providers import initialize_providers
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
 from modules.settings import Settings, api_key_configured
@@ -89,9 +93,9 @@ class VoiceTypingApp:
 
         # Recover the most recent recording for retry-after-restart, then sweep stale snapshots
         self.last_recording = self._recover_last_recording()
-        self.ctrl_pressed = False
-        self.caps_down = False
-        self.caps_passthrough = False
+        # Interprets raw keyboard-hook messages (repeat, Ctrl chord, injected)
+        # into one toggle per physical Caps Lock press; see modules/hotkey.py
+        self._hotkey = CapsLockHotkey()
         self.clean_transcription_enabled = self.settings.get('clean_transcription')
         self.history = TranscriptionHistory()
 
@@ -140,50 +144,16 @@ class VoiceTypingApp:
         self.ui_feedback.set_retry_callback(self.retry_transcription)
 
         def win32_event_filter(msg: int, data: Any) -> bool:
-            VK_CONTROL = 0x11
-            VK_LCONTROL = 0xA2
-            VK_RCONTROL = 0xA3
-            VK_CAPITAL = 0x14
-
-            WM_KEYDOWN = 0x0100
-            WM_KEYUP = 0x0101
-
-            LLKHF_INJECTED = 0x10
-
-            if data.vkCode in (VK_CONTROL, VK_LCONTROL, VK_RCONTROL):
-                if msg == WM_KEYDOWN:
-                    self.ctrl_pressed = True
-                elif msg == WM_KEYUP:
-                    self.ctrl_pressed = False
-                return True
-
-            if data.vkCode == VK_CAPITAL:
-                # Let our own corrective keystrokes pass through
-                if data.flags & LLKHF_INJECTED:
-                    return True
-
-                if msg == WM_KEYDOWN:
-                    if self.ctrl_pressed:
-                        self.caps_passthrough = True
-                        return True
-
-                    if self.caps_down:
-                        # suppress_event() RAISES (exiting this filter), so OS
-                        # key-repeat stops here and never re-toggles recording
-                        self.listener.suppress_event()
-
-                    self.caps_down = True
-                    self.caps_passthrough = False
-                    threading.Thread(target=self._on_caps_lock_press, daemon=True).start()
-                    self.listener.suppress_event()
-
-                elif msg == WM_KEYUP:
-                    self.caps_down = False
-                    if self.caps_passthrough:
-                        self.caps_passthrough = False
-                        return True
-                    self.listener.suppress_event()
-
+            # Thin adapter: the decision lives in CapsLockHotkey (pure, tested);
+            # this callback only performs the side effects. Keep it fast —
+            # Windows silently drops a low-level hook that stalls.
+            action = self._hotkey.handle(msg, data.vkCode, data.flags)
+            if action is HotkeyAction.TOGGLE:
+                threading.Thread(target=self._on_caps_lock_press, daemon=True).start()
+            if action in (HotkeyAction.TOGGLE, HotkeyAction.SUPPRESS):
+                # suppress_event() RAISES (exiting this filter) by design, so
+                # the OS never sees the key and nothing after this line runs
+                self.listener.suppress_event()
             return True
 
         self.listener = keyboard.Listener(
@@ -582,6 +552,9 @@ class VoiceTypingApp:
         surfaces and never call back into the queue (data arrives as
         arguments)."""
         queue_ref: list = []
+        # Most recent classified chunk failure, so the end-of-session summary
+        # can name the cause instead of just counting casualties
+        last_failure: list = []
         # Transcript-limitations note for the LLM reading the paste, sent once
         # per session ahead of whichever chunk is delivered first
         preamble_pending = [bool(self.settings.get('session_preamble'))]
@@ -648,17 +621,23 @@ class VoiceTypingApp:
             elif not self.recording:
                 self.ui_feedback.show_warning(f"⚠️ Chunk {index} failed, retrying…", 3000)
 
-        def on_failed(index: int, path: str) -> None:
+        def on_failed(index: int, path: str, error: Optional[BaseException]) -> None:
             # Keep the file and point the retry machinery at it (tray "Retry
             # Last Transcription" copies the result to the clipboard) — unless
             # a newer dictation is mid-processing, whose own retry candidate
             # must not be clobbered
             if not (self.processing_thread and self.processing_thread.is_alive()):
                 self.last_recording = path
+            failure = describe_transcription_error(error) if error else None
+            # Remember the reason so on_drained can explain the whole session
+            if failure and not failure.silent:
+                last_failure.append(failure)
+            reason = f" — {failure.short}" if failure else ""
             if self._session_active and is_current():
-                self._set_session_alert(f"⚠️ chunk {index} failed", 6.0)
+                self._set_session_alert(f"⚠️ chunk {index} failed{reason}", 6.0)
             elif not self.recording:
-                self.ui_feedback.show_warning(f"⚠️ Chunk {index} failed (retry from tray)", 5000)
+                self.ui_feedback.show_warning(
+                    f"⚠️ Chunk {index} failed{reason}\n(retry from tray)", 5000)
             else:
                 # A newer recording owns the indicator; the warning overlay
                 # would hide it when it auto-dismisses, so just log
@@ -684,9 +663,17 @@ class VoiceTypingApp:
                 return
             if failed_paths:
                 self.last_recording = failed_paths[-1]
-                message = f"⚠️ {len(failed_paths)} chunk(s) failed"
-                self.ui_feedback.show_error_with_retry(message)
-                self.status_manager.set_status(AppStatus.ERROR, message)
+                count = f"⚠️ {len(failed_paths)} chunk(s) failed"
+                # Name the cause from the most recent failure; when every chunk
+                # died the same way (quota, key, network) that's the whole story
+                failure = last_failure[-1] if last_failure else None
+                short = f"{count} — {failure.short}" if failure else count
+                overlay = f"{short}\n{failure.hint}".rstrip() if failure else count
+                # Status first, retry overlay second: both repaint the
+                # indicator label in queue order, and only the overlay
+                # carries the hint and the "click to retry" line
+                self.status_manager.set_status(AppStatus.ERROR, short)
+                self.ui_feedback.show_error_with_retry(overlay)
             elif (self.status_manager.current_status == AppStatus.PROCESSING or
                   self.status_manager.current_status in RECORDING_STATUSES):
                 # Clear our own post-session PROCESSING state — including the
@@ -881,12 +868,7 @@ class VoiceTypingApp:
             if not success:
                 if self._is_stale(gen):
                     return
-                if result == "timeout":
-                    self.ui_feedback.show_error_with_retry("⏱️ Request timed out - try again")
-                    self.status_manager.set_status(AppStatus.ERROR, "⏱️ Request timed out")
-                else:
-                    self.ui_feedback.show_error_with_retry("⚠️ Transcription failed")
-                    self.status_manager.set_status(AppStatus.ERROR, "⚠️ Error processing audio")
+                self._report_failure(result)
             elif result:
                 if self._is_stale(gen):
                     return
@@ -907,16 +889,32 @@ class VoiceTypingApp:
             if self._is_stale(gen):
                 return
             self.logger.error("Error in _process_audio_thread:", exc_info=True)
-            if 'timeout' in str(e).lower():
-                self.ui_feedback.show_error_with_retry("⏱️ Request timed out - try again")
-                self.status_manager.set_status(AppStatus.ERROR, "⏱️ Request timed out")
-            else:
-                self.ui_feedback.show_error_with_retry("⚠️ Transcription failed")
-                self.status_manager.set_status(AppStatus.ERROR, "⚠️ Error processing audio")
+            self._report_failure(describe_transcription_error(e))
+
+    def _report_failure(self, failure: Union[str, TranscriptionFailure, None],
+                        prefix: str = "") -> None:
+        """Surface a classified failure on the indicator and the tray tooltip.
+
+        Silent failures (cancelled, nothing recorded) are control flow, not
+        errors — they leave the current status alone."""
+        if not isinstance(failure, TranscriptionFailure):
+            failure = TranscriptionFailure("⚠️ Transcription failed")
+        if failure.silent:
+            return
+        # Order matters: both calls repaint the indicator label via the UI
+        # queue, and the ERROR status only knows the short line. The retry
+        # overlay must land last so the hint and "🔄 Click to retry" survive.
+        self.status_manager.set_status(AppStatus.ERROR, prefix + failure.short)
+        self.ui_feedback.show_error_with_retry(prefix + failure.overlay)
 
     def _attempt_transcription(self, recording_path: Optional[str] = None,
-                               streamed_text: Optional[str] = None) -> Tuple[bool, Optional[str]]:
-        """Attempt transcription and return (success, result or error_type).
+                               streamed_text: Optional[str] = None
+                               ) -> Tuple[bool, Union[str, TranscriptionFailure, None]]:
+        """Attempt transcription and return (success, result or failure).
+
+        On success the second element is the transcript. On failure it is a
+        TranscriptionFailure carrying display text for the caller — silent
+        ones (cancelled, nothing recorded) should produce no error UI.
 
         Pass recording_path explicitly when the caller may run concurrently
         with new recordings (retry), since self.last_recording is mutable.
@@ -926,7 +924,7 @@ class VoiceTypingApp:
             path = recording_path or self.last_recording
             if not path:
                 self.logger.error("Attempted transcription with no recording available.")
-                return False, "no_recording"
+                return False, NO_RECORDING
 
             # Update status to show we're transcribing (skip if already cancelled,
             # so a cancel can't be overwritten by a stale pulsing status)
@@ -935,7 +933,7 @@ class VoiceTypingApp:
             text = streamed_text if streamed_text else transcribe_audio(path)
 
             if self.cancel_flag.is_set():
-                return False, "cancelled"
+                return False, CANCELLED
 
             # Meeting/phone transcripts are speaker-labeled; LLM cleaning would
             # mangle the labels, so skip it for those recordings
@@ -960,13 +958,8 @@ class VoiceTypingApp:
 
             return True, text
         except Exception as e:
-            # Check if it's a timeout exception
-            if 'timeout' in str(e).lower():
-                self.logger.error(f"Transcription timeout: Request took too long", exc_info=True)
-                return False, "timeout"
-            else:
-                self.logger.error(f"Transcription error: {e}", exc_info=True)
-                return False, None
+            self.logger.error(f"Transcription error: {e}", exc_info=True)
+            return False, describe_transcription_error(e)
 
     def retry_transcription(self) -> None:
         """Retry transcription of last failed recording"""
@@ -989,8 +982,8 @@ class VoiceTypingApp:
                 if self.update_icon_menu:
                     self.update_icon_menu()
             else:
-                self.ui_feedback.show_error_with_retry("⚠️ Retry failed")
-                self.status_manager.set_status(AppStatus.ERROR)
+                # Keep the reason (quota, key, network) visible on the retry
+                self._report_failure(result, prefix="🔄 Retry failed — ")
 
         threading.Thread(target=retry_thread, daemon=True).start()
 

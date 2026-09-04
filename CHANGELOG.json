@@ -1,6 +1,28 @@
 {
     "categories": ["General"],
     "changelog": [
+    {
+      "category": "General",
+      "date": "2026-09-04",
+      "changes": [
+        "Failed transcriptions now actually show the 'Click to retry' hint and the suggested fix on the indicator; previously the plain error status repainted over them, so the overlay was clickable but never said so.",
+        "Pressing Ctrl+Caps Lock and then releasing Ctrl while Caps Lock is still held no longer starts toggling recording on the key's auto-repeat.",
+        "If Windows ever fails to deliver a Caps Lock key-release to the app (remote desktop, virtual machines, a stalled keyboard hook), the hotkey recovers on the next press instead of appearing dead until restart.",
+        "Holding either Ctrl key now counts for the Ctrl+Caps Lock chord even when the other Ctrl key is released first.",
+        "Added an automated test suite for the parts most likely to break silently: the Caps Lock hotkey (mashing, holding, chords), ordered chunk delivery in Meeting/Phone sessions, and error classification. Contributors: see tests/README.md."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-09-03",
+      "changes": [
+        "Transcription errors now say what actually went wrong instead of a generic 'Error processing audio'. The recording indicator and tray tooltip name the cause and the fix — out of provider credits, API key missing or rejected, rate limited, request timed out, no internet connection, recording too large, or a provider outage — and unrecognized failures show the real error text rather than hiding it in the log.",
+        "Error messages now name the provider that failed (for example 'ElevenLabs quota exhausted'), so it is clear which service to top up or switch away from when several are configured.",
+        "Failed Meeting/Phone chunks now report their reason in the session label and in the end-of-session summary, instead of only counting how many chunks failed.",
+        "Retrying a failed transcription from the tray now shows why the retry failed, rather than just 'Retry failed'.",
+        "Cancelling a recording no longer flashes a misleading 'Transcription failed' error."
+      ]
+    },
       {
         "category": "General",
         "date": "2026-08-13",

@@ -1,7 +1,8 @@
 """Multi-provider Speech-to-Text module with Strategy pattern"""
 import os
 import logging
-from typing import Union, Optional
+from contextlib import contextmanager
+from typing import Iterator, Union, Optional
 from pathlib import Path
 
 # Provider modules are imported lazily inside _get_transcriber to keep app
@@ -22,6 +23,20 @@ settings = Settings()
 # transcriptions reuse HTTP clients/connections. A settings change produces a
 # different key, which transparently creates a fresh instance.
 _transcriber_cache: dict = {}
+
+
+@contextmanager
+def _tag_provider(provider: str) -> Iterator[None]:
+    """Stamp escaping exceptions with the provider that raised them.
+
+    modules.error_messages reads this to name the service in the user-facing
+    error ("ElevenLabs quota exhausted" rather than "transcription failed")."""
+    try:
+        yield
+    except Exception as e:
+        if not getattr(e, 'provider', None):
+            e.provider = provider
+        raise
 
 
 def _get_transcriber(provider_name: str):
@@ -169,13 +184,15 @@ def transcribe_audio(filename: str, language: Optional[str] = None) -> str:
     # ElevenLabs Scribe multichannel, which attributes speakers by channel.
     if is_multichannel_recording(filename):
         logger.info("Meeting recording detected; using ElevenLabs Scribe multichannel")
-        return _get_meeting_transcriber().transcribe(filename)
+        with _tag_provider('elevenlabs'):
+            return _get_meeting_transcriber().transcribe(filename)
 
     # Phone-mode recordings (mono, multiple speakers on one mic) route to
     # ElevenLabs Scribe with voice diarization for speaker attribution.
     if is_phone_recording(filename):
         logger.info("Phone recording detected; using ElevenLabs Scribe diarization")
-        return _get_phone_transcriber().transcribe(filename)
+        with _tag_provider('elevenlabs'):
+            return _get_phone_transcriber().transcribe(filename)
 
     provider = settings.get('stt_provider') or _default_provider()
 
@@ -203,6 +220,9 @@ def transcribe_audio(filename: str, language: Optional[str] = None) -> str:
 
     except Exception as e:
         logger.error(f"Transcription failed with provider {provider}: {e}")
+        # Stamp the provider so the UI layer can name it in the error message
+        if not getattr(e, 'provider', None):
+            e.provider = provider
         raise
 
 
