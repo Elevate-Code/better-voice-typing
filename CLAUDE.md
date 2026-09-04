@@ -25,7 +25,7 @@ uv run pytest
 
 # Frozen build + installer (what users get; CI does this on a v* tag)
 uv run pyinstaller BetterVoiceTyping.spec --noconfirm        # -> dist\BetterVoiceTyping\
-& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0 installer\BetterVoiceTyping.iss   # -> dist\installer\
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0 installer\BetterVoiceTyping.iss   # -> dist\installer\  (PowerShell only: Git Bash turns /Q and /D switches into paths and ISCC silently compiles nothing)
 
 # Manual tool: real-keyboard hotkey check
 .\.venv\Scripts\python.exe tests\manual\keyboard_test.py
