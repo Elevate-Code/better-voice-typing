@@ -172,11 +172,12 @@ CUSTOM_STT_API_KEY="your-api-key-here"
    - Run: `setup.bat` (Command Prompt) or `.\setup.bat` (PowerShell)
    - This will create a virtual environment, install packages, and set up default configuration
    - If you encounter any installation issues, please [report them](https://github.com/Elevate-Code/better-voice-typing/issues)
-4. Open the `.env` file in Notepad, add at least one speech-to-text API key (not needed only if you run a local Custom STT server — see below), and save:
+4. Launch the application by double-clicking the `run_voice_typing.bat` file in the application folder. A microphone icon appears in the system tray.
+5. Right-click the tray icon → **Open API Keys (.env)**, add at least one speech-to-text API key (not needed only if you run a local Custom STT server — see below), save, then tray icon → **Restart**:
    - ElevenLabs API key ([get one here](https://elevenlabs.io/app/settings/api-keys)) — recommended: best dictation accuracy, and required for Meeting/Phone modes
-   - and/or OpenAI API key ([get one here](https://platform.openai.com/api-keys)) — also enables Streaming Dictation
-   - (Optional) Anthropic API key for text cleaning
-5. Launch the application by double-clicking the `run_voice_typing.bat` file in the application folder
+   - and/or OpenAI API key ([get one here](https://platform.openai.com/api-keys)) — also enables Streaming Dictation and transcript cleaning
+
+   Your keys and settings live in `Documents\VoiceTyping\`, so they survive app updates.
 6. 💡 Ensure the app's tray icon is visible by right-clicking the taskbar → "Taskbar settings" → "Select which icons appear on the taskbar" → Toggle on for Voice Typing Assistant
 7. Right-click `run_voice_typing.bat` → Send to → Desktop to create a shortcut
 
@@ -218,11 +219,10 @@ To update to the latest version:
 3. Create a virtual environment with `uv venv --python ">=3.10,<3.13"`
 4. Activate with `.venv\Scripts\activate`
 5. Install dependencies with `uv pip install -r requirements.txt`
-6. Create a `.env` file based on `.env.example` by running `cp .env.example .env`
-7. Set up your API keys in `.env` (at least one STT key):
+6. Run the app once; it creates `Documents\VoiceTyping\.env` from `.env.example` (an app-folder `.env` from older versions is moved there automatically)
+7. Set up your API keys in that `.env` (at least one STT key):
    - ElevenLabs API key from the [ElevenLabs dashboard](https://elevenlabs.io/app/settings/api-keys) (recommended default; powers Meeting/Phone modes)
-   - and/or OpenAI API key from [OpenAI's API Keys page](https://platform.openai.com/api-keys) (also powers Streaming Dictation)
-   - (Optional) Anthropic API key if you want to use the text cleaning feature
+   - and/or OpenAI API key from [OpenAI's API Keys page](https://platform.openai.com/api-keys) (also powers Streaming Dictation and transcript cleaning)
 8. Run the app from the command line:
    ```
    .\.venv\Scripts\python.exe .\voice_typing.pyw

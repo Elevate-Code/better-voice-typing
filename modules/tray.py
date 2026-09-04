@@ -13,6 +13,7 @@ from PIL import Image
 from modules.audio_manager import get_input_devices, get_default_device_id, create_device_identifier, names_match
 from modules import transcribe
 from modules.logger import get_log_dir
+from modules.settings import ENV_FILE
 
 # Windows constants for TaskbarCreated message
 WM_USER = 0x0400
@@ -401,6 +402,10 @@ class TrayIconManager:
                     pystray.MenuItem(
                         'Open Settings File',
                         lambda icon, item: os.startfile(app.settings.settings_file)
+                    ),
+                    pystray.MenuItem(
+                        'Open API Keys (.env)',
+                        lambda icon, item: os.startfile(str(ENV_FILE))
                     ),
                     pystray.MenuItem(
                         'Open Logs Folder',
