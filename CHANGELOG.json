@@ -1,11 +1,20 @@
 {
-    "categories": ["General"],
-    "changelog": [
+  "categories": [
+    "General"
+  ],
+  "changelog": [
     {
       "category": "General",
       "date": "2026-09-04",
       "version": "1.0.0",
       "changes": [
+        "New main window (left-click the tray icon, or tray → Open Better Voice Typing). The first launch opens a short setup: paste an ElevenLabs and/or OpenAI API key and test it right there, check your microphone with a live level meter that says whether it hears you, then try a dictation into a text box. Afterwards the same window holds every setting as a normal settings screen (General, Dictation, Conversation modes, Indicator, Advanced) plus a History page; the tray menu keeps the quick toggles.",
+        "The recording indicator is now a rounded, translucent pill that never resizes: '🎤 Recording 0:07' with the level bar underneath. The '(click to cancel)' label is gone (clicking still cancels; the setup and Home pages explain the controls), the mode hints for Meeting/Phone moved to the notice shown when you switch the mode on, and while transcribing the level bar turns into a moving progress sweep so it is obvious something is happening. The level bar itself animates smoothly instead of stepping.",
+        "The tray icon is drawn in the same colour as the indicator for every state — red while recording, purple while transcribing, orange only for errors — instead of the old yellow that meant both 'working' and 'something went wrong'. When idle it follows your taskbar theme (light glyph on a dark taskbar and vice versa).",
+        "Optional soft sound cues when a recording starts and stops (off by default; turn on in the setup or under General).",
+        "General settings gains 'Start when I sign in to Windows' (creates or removes the Startup shortcut the installer offers) and a language picker; Dictation settings expose the silent-start timeout and maximum recording length as numbers rather than on/off.",
+        "The whole UI moved from tkinter to Qt, which is what makes the rounded overlay, the settings window and the always-on-top handling reliable. The installer grows to roughly 50 MB as a result.",
+        "BREAKING: a key in Documents\\VoiceTyping\\.env now takes precedence over a same-named Windows environment variable. Previously a machine-wide OPENAI_API_KEY silently won over the one in the file, so the key you saw in .env was not always the one being used.",
         "Better Voice Typing 1.0 ships as a real Windows installer (BetterVoiceTyping-Setup-<version>.exe on the GitHub release): per-user install with no admin prompt, Start menu entry, optional start-at-sign-in, and a normal uninstall entry. Installing from source with uv remains supported for developers.",
         "The app now updates itself: it checks for a new release once a day and mentions it on the indicator, and tray → Check for Updates downloads the installer, verifies its checksum against the release's SHA256SUMS.txt, installs silently and relaunches. The old setup.bat update flow that overwrote files in place is gone.",
         "The tray icon pins itself as always visible on Windows 11 instead of starting hidden behind the overflow arrow, since the icon is the app's only UI. It does this once per installation; if you hide it again on purpose, the app leaves it alone.",
@@ -40,249 +49,249 @@
         "Cancelling a recording no longer flashes a misleading 'Transcription failed' error."
       ]
     },
-      {
-        "category": "General",
-        "date": "2026-08-13",
-        "changes": [
-          "Meeting and Phone mode sessions now acknowledge every caps-lock send in the recording indicator: the label immediately shows 'transcribing…' while the chunk is processed (recording continues), 'N queued' if sends stack up, a brief 'pasted' confirmation once the text lands at the cursor, and 'nothing new to send' when a send is skipped because nothing was said since the last one.",
-          "Sending a chunk in Meeting/Phone mode now restarts microphone capture before analyzing the sealed chunk instead of after, shrinking the short gap at each chunk boundary where speech could be missed.",
-          "Microphone menu overhaul: the checkmark now moves immediately when you select a device, favorite microphones are pinned to the top of the Select Device list, and favorites/selection are matched by device name so they no longer silently stop matching when a device reports different specs.",
-          "'Refresh Devices' now performs a real rescan, so microphones plugged in or removed while the app is running actually appear (previously the list was frozen at startup). The saved microphone selection is re-resolved after each rescan.",
-          "The default-device marker in the microphone menu now always points at the actual Windows default input device; previously it followed whatever device you had selected.",
-          "Changing the microphone during a Meeting/Phone session now takes effect immediately by sending the current chunk and continuing on the new device.",
-          "The session preamble (first chunk of a Meeting/Phone session) now also briefs the reading AI on how to collaborate: act as a silent advisor, explore relevant context as the conversation progresses, keep replies brief, and bold anything it wants said aloud.",
-          "The microphone list no longer shows each device 3-5 times: Windows exposes every device once per audio host API (some with names cut off at 31 characters), and the menu now lists each physical device exactly once under its full name, matching what Windows Sound settings shows. Recording still automatically uses the resampling-capable variant of the chosen device behind the scenes, so all recording sample rates keep working. Saved device selections and favorites with truncated names are upgraded automatically when unambiguous."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2026-07-31",
-        "version": "0.8.0",
-        "changes": [
-          "ElevenLabs Scribe v2 is now the preferred dictation provider: stt_provider defaults to null (automatic), which picks ElevenLabs when ELEVENLABS_API_KEY is configured and OpenAI otherwise — so OpenAI-only setups keep working unchanged, and unfilled .env placeholder values are ignored. In WER benchmarks on dictation-style speech, Scribe v2 was noticeably more accurate than gpt-4o-transcribe (12.25% vs 17.07%). Settings still pinned to the old hardcoded OpenAI default are moved to automatic once; an explicit provider choice made afterwards (including the new 'Automatic' option in the tray provider menu) always sticks.",
-          "The ElevenLabs dictation path now honors the stt_language setting instead of always transcribing as English.",
-          "A recording device failure mid-session (e.g. microphone unplugged) no longer discards the session's already-captured audio: queued chunks still transcribe and deliver in order, audio captured since the last send is salvaged into the queue, and the error is reported accurately instead of as 'No audio detected'. A device failure during normal dictation likewise transcribes what was captured.",
-          "Fixed the updater always re-downloading the app even when up to date (release tags carry a 'v' prefix that was never stripped before comparing versions), and made it preserve the legacy modules/settings.json so updating directly from v0.6.x or older no longer loses your settings.",
-          "Meeting Mode and Phone Mode now have a dedicated plain-language guide at docs/conversation-modes.md covering the session model, speaker labels, and voice matching; the README sections were condensed to overviews.",
-          "Repo cleanup for open-source hygiene: removed stale internal design docs and editor config files, moved maintainer notes out of this changelog, fixed an outdated settings-file path in the troubleshooting guide, and corrected a stale repository link in the README.",
-          "Security: updated Pillow to 12.3.0, resolving all 13 open Dependabot alerts (10 high, 3 moderate)."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2026-07-22",
-        "changes": [
-          "Meeting Mode and Phone Mode now record as continuous sessions: pressing Caps Lock no longer stops the recording — it sends everything captured since the last press for transcription and recording resumes immediately (sub-second gap mic-only; up to a couple of seconds in Meeting Mode while the 2-channel file is composed), so no conversation audio is lost while waiting for a transcript mid-call.",
-          "Chunks transcribe concurrently in the background but their transcripts are inserted at the cursor strictly in order — a fast later chunk waits for a slow earlier one, so the assembled transcript always reads chronologically.",
-          "To end a session, click the recording indicator or toggle the mode off in the tray; audio captured since the last send is discarded by design (press Caps Lock first to keep it). The indicator label now reads 'caps=send · click=end' in these modes.",
-          "Phone Mode chunk transcripts are prefixed with a '--- [chunk N] ---' header because diarization speaker labels are assigned per request and can swap identities between chunks; the header signals that labels only hold within a chunk.",
-          "A chunk that fails to transcribe retries once automatically (with a note shown in the recording label), and if it fails again its audio is kept for Retry Last Transcription in the tray while the session carries on; the snapshot sweeper no longer touches chunk files that are still queued.",
-          "Quiet chunks (nothing said since the last send) are skipped silently instead of flashing an error, the silent-start auto-cancel only applies to a session's first chunk, and hitting the max recording duration mid-session auto-sends the chunk and keeps recording instead of stopping.",
-          "Phone Mode transcripts are now unlabeled by default: speaker turns still get their own lines, but the generic 'Speaker N' labels — which are assigned per chunk and can swap identities between chunks of a session — are dropped. Set phone_speaker_labels: true in settings.json to restore them.",
-          "The first chunk delivered in a meeting/phone session is prefixed with a short bracketed transcript-limitations note addressed to whoever reads the paste (typically an AI assistant): proper nouns, abbreviations, and speaker attribution may be wrong, so interpret quietly from context without surfacing corrections. Disable via session_preamble: false in settings.json.",
-          "Hardened the session machinery after an independent review: a draining session queue can no longer alter a later dictation's status or retry candidate, cancelling a dictation no longer discards queued session chunks, snapshot enumeration tolerates chunk files deleted mid-scan, the recorder watchdog is token-scoped so duplicate polling chains can't double-fire stop/flush, mode toggles are atomic with session start/end, a cancelled chunk no longer burns a retry API call, and a dismissing warning can no longer hide the indicator while a recording is live.",
-          "Phone Mode can now identify YOUR voice via ElevenLabs' workspace speaker library (dashboard: Speech to Text -> Speakers): enroll 10-60s of solo audio and set phone_my_speaker_id to your registered Speaker ID, and matched words return that ID instead of speaker_N (verified empirically), giving stable 'Me:' / 'Them:' labels across all session chunks. Other enrolled speakers are labeled by their prettified slug; if no voice matches in a chunk, output falls back to unlabeled turns. Controlled by use_speaker_library (default true; harmless no-op when the library is empty).",
-          "Added phone_diarization_threshold (default 0.3), which replaces the phone_num_speakers hint when set. A seeded 0.1-0.4 sweep on a 4-speaker meeting recording showed the parameter also gates speaker-library match acceptance: diarization clusters were identical at every value, but the enrolled speaker only matched at thresholds >= 0.26 (~98% word accuracy, stable through 0.4) while the API default (~0.22) rejected the match entirely. 0.3 sits mid-plateau with margin. The session preamble now explains the Me/Them voice-matched labels when phone_my_speaker_id is configured."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2026-07-21",
-        "changes": [
-          "Added Phone Mode (tray menu toggle) for conversations happening in the room — a call on speakerphone or an in-person chat where all voices reach the microphone. Recording stays mic-only and transcripts come back diarized with 'Speaker 1:' / 'Speaker 2:' labels in order of first appearance. Requires ELEVENLABS_API_KEY in .env.",
-          "Phone recordings are tagged via WAV metadata so they route to ElevenLabs Scribe voice diarization even across retries and app restarts; the expected speaker count is configurable via phone_num_speakers in settings.json (default 2).",
-          "Meeting Mode and Phone Mode are mutually exclusive — enabling one automatically turns the other off. LLM transcript cleaning is skipped for phone recordings to preserve speaker labels, same as meeting recordings.",
-          "The recording indicator now shows a mode-specific color and label while recording: crimson-pink 'Recording meeting' for Meeting Mode and violet 'Recording call' for Phone Mode, so the active mode is visible at a glance without clashing with the other status colors (blue processing, indigo transcribing, teal cleaning, orange error).",
-          "Added Streaming Dictation (Beta, Settings menu toggle): normal dictation is transcribed over an OpenAI Realtime websocket while you are still speaking, so text is ready ~1-3 seconds after you stop regardless of recording length (previously the wait grew with clip length). Applies to normal mode only; Meeting and Phone modes keep their batch pipelines.",
-          "Streaming recordings are captured at 24 kHz to match the Realtime API's PCM format, and the WAV file is still written in parallel: if the websocket fails at any point (connect, mid-recording, or during the final flush) the app falls back to the regular batch upload automatically, so streaming can only make transcription faster, never less reliable.",
-          "The streaming session flushes the final speech turn with synthetic silence before closing, preventing the last sentence from being cut off when recording stops immediately after the last word.",
-          "Fixed the streaming session dying on speech turns longer than ~10 seconds: the websocket read timeout was treated as fatal, but the server legitimately sends no events during a long uninterrupted turn.",
-          "Tuned streaming VAD defaults after WER benchmarking (st-vtt-bench): lowered the speech-detection threshold from 0.5 to 0.3 and disabled near-field noise reduction, which together were silently discarding quiet and phone-bandwidth speech (86% word loss on a phone-call sample; now captures it).",
-          "Switched streaming turn detection from energy-based server_vad to semantic_vad (model-based) after further benchmarking: on casual dictation audio it cut missed words from ~16% to ~4% and brought overall streaming WER below even the batch gpt-4o-transcribe pipeline (15.1% vs 17.1%), while matching batch on clean narration (2.7%). Tail-capture verified 3/3 with the new turn detector."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2026-07-20",
-        "changes": [
-          "Added Meeting Mode (tray menu toggle): Caps Lock recordings capture your microphone plus system audio (whatever you hear) as separate channels, and transcripts come back speaker-labeled ('Me:' / 'Them:') — ideal for capturing both sides of a call. Requires ELEVENLABS_API_KEY in .env.",
-          "Meeting recordings are transcribed with ElevenLabs Scribe v2 multichannel mode, attributing speakers by channel (your mic is always 'Me') instead of relying on voice diarization; speaker labels are configurable via meeting_speaker_you/meeting_speaker_them in settings.json.",
-          "If system-audio capture is unavailable (e.g. output device issues), meeting-mode recordings fall back to normal mic-only dictation automatically.",
-          "Silent-start auto-cancel is skipped in meeting mode so clips where only the other party is speaking are not discarded; LLM transcript cleaning is also skipped to preserve speaker labels."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2026-07-11",
-        "version": "0.7.1",
-        "changes": [
-          "Security: updated litellm (2 critical, 4 high CVEs), Pillow (3 high, 2 medium), requests, and python-dotenv to patched versions, resolving all 13 open Dependabot alerts.",
-          "Updated the OpenAI SDK to 2.x as required by the new litellm version; transcription behavior is unchanged.",
-          "Saved llm_model values without a provider prefix (e.g. 'claude-3-5-haiku-latest') are migrated to prefixed form ('anthropic/...') since newer litellm versions no longer infer the provider."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2026-07-11",
-        "version": "0.7.0",
-        "changes": [
-          "Fixed canceling an in-flight transcription leaving the indicator stuck on a pulsing status; canceling now resets the UI immediately.",
-          "Fixed a race where canceling a recording by clicking the indicator and immediately pressing Caps Lock could start a new recording while the previous one was still shutting down.",
-          "Fixed retrying a transcription racing with new recordings, which could delete or swap the audio file mid-retry.",
-          "Crash recovery now keeps the newest completed snapshot as a retry fallback instead of deleting it in favor of a possibly-partial temp recording.",
-          "Removed the unused Google STT placeholder provider, the never-implemented Smart Capture stub, and legacy dead code; saved settings referencing them are migrated automatically.",
-          "Fixed a disk leak where every recording was snapshotted to temp_audio.wav.N.wav and never deleted; the app now keeps only the most recent recording for retry and sweeps stale snapshots at startup.",
-          "Fixed thread-safety throughout the UI: all tkinter updates from the audio, processing, hotkey, and tray threads are now marshalled onto the main thread, eliminating a class of intermittent indicator freezes and glitches.",
-          "Fixed the status pulse animation accumulating multiple timers across status transitions, which caused accelerating flicker.",
-          "Fixed the audio level bar disappearing when a recording started while a warning message was showing.",
-          "Made Settings a shared singleton and moved settings.json to Documents/VoiceTyping (with automatic migration), fixing a bug where different modules could silently revert each other's saved settings.",
-          "Added a single-instance guard (named mutex) so launching the app twice no longer results in two competing keyboard hooks and tray icons.",
-          "Recordings are now uploaded as FLAC (lossless, roughly 40-50% smaller than WAV), reducing transcription latency and doubling the effective recording length under OpenAI's 25 MB upload cap.",
-          "Deferred heavy imports (litellm, OpenAI SDK) and cached transcriber clients, cutting app startup time by over 5 seconds and saving connection setup time on every transcription.",
-          "Added a max_recording_duration setting (default 15 minutes) that auto-stops and still transcribes, instead of silently failing on oversized uploads.",
-          "The recording indicator now shows elapsed recording time.",
-          "Transcription history is now persisted to Documents/VoiceTyping/history.json (last 50 entries with timestamps) so dictations survive restarts and crashes.",
-          "Added 'Open Settings File' and 'Open Logs Folder' items to the tray Settings menu.",
-          "Clipboard restore after pasting no longer wipes non-text clipboard content (images/files) and its delay is configurable via clipboard_restore_delay_ms.",
-          "The Google STT placeholder now raises an error instead of pasting placeholder text; custom STT endpoints use a fast connect timeout and remember the working endpoint.",
-          "Replaced console print calls with logger calls so errors are no longer lost to the hidden console window, and added a log_transcript_text setting to optionally keep transcript text out of log files."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-07-23",
-        "version": "0.6.6",
-        "changes": [
-          "Improved the workaround for OpenAI's transcription cut-off issue by replacing silent padding with more effective brown noise padding."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-07-21",
-        "version": "0.6.5",
-        "changes": [
-          "Fixed run_voice_typing.bat file having Unix line endings in the repository, which could cause issues on Windows systems when downloaded directly from GitHub. Thanks to @Theo-Deffenbaugh for reporting this issue.",
-          "Added .gitattributes file to ensure batch files always maintain Windows line endings (CRLF) in the repository, preventing future line ending issues."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-07-17",
-        "version": "0.6.4",
-        "changes": [
-          "Added a 'mini' UI mode for a more compact recording indicator, configurable via tray settings and the new `ui_indicator_size` setting in `settings.json`.",
-          "Added `top-center` and `bottom-center` UI indicator positions and applied an offset to bottom positions to prevent being obscured by the taskbar.",
-          "Reorganized the 'Recording Indicator' tray menu to group size and position settings for better usability."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-07-17",
-        "version": "0.6.3",
-        "changes": [
-          "Fixed Python version compatibility checks in setup.bat and documentation to explicitly require Python 3.10-3.12, addressing Pillow wheel availability issue reported by @Theo-Deffenbaugh.",
-          "Fixed the retry transcription functionality to remain available even after successful transcriptions, allowing users to retry when transcription results are inaccurate.",
-          "The retry button now stays enabled until a new recording is started, enabling multiple retry attempts for the same audio."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-07-08",
-        "version": "0.6.2",
-        "changes": [
-          "Improved application restart reliability by using `subprocess.Popen` to preserve the virtual environment context.",
-          "Fixed the silent-start timeout feature to correctly respect user settings.",
-          "Added a 'Fine-Tuning' section to the README to document advanced user-configurable settings.",
-          "Attempted fix for issue with native caps lock functionality being activated randomly.",
-          "Implemented automatic log file cleanup with a configurable `log_retention_days` setting to manage disk space."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-06-23",
-        "version": "0.6.1",
-        "changes": [
-          "Implemented a temporary workaround to fix transcription cut-off issues with OpenAI's gpt-4o models by padding audio with a short silence."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-06-22",
-        "version": "0.6.1",
-        "changes": [
-          "Enhanced microphone handling to log the active recording device on startup and selection, and fixed a sync issue between settings and the tray menu display.",
-          "Fixed a Unicode encoding error in console logging on Windows to correctly display emoji characters.",
-          "Refactored logging setup into a dedicated `modules/logger.py` file for improved code organization.",
-          "Refined transcription logging for clarity by consolidating provider/model details and adding a preview of the transcribed text upon completion.",
-          "Fixed UI indicator positioning to correctly align on the primary monitor in multi-display setups.",
-          "Added a 'UI Indicator Position' setting to the tray menu, allowing users to select a corner for the indicator.",
-          "Added configurable `silence_threshold` in `settings.json` to fix transcription issue#2.",
-          "Added a `Troubleshooting` section to README.md for the new setting.",
-          "Improved logging by including RMS values on discarded audio and fixing `.pyw` output."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-06-22",
-        "version": "0.6.0",
-        "changes": [
-          "Renamed 'Auto-Stop on Silence' setting to 'Silent-Start Timeout' for clarity and added an automatic migration for existing user settings.",
-          "Updated README.md with new information and added a migration guide."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-06-21",
-        "version": "0.6.0",
-        "changes": [
-          "🎉 Implemented multi-provider Speech-to-Text framework with support for OpenAI's new GPT-4o Transcribe models.",
-          "Added provider selection in the tray menu under Settings → Speech-to-Text → Provider.",
-          "Added model selection for OpenAI STT with Whisper, GPT-4o, and GPT-4o Mini options.",
-          "Implemented Strategy and Factory patterns for flexible STT provider architecture, making it easy to add new providers.",
-          "Updated default transcription model from Whisper to GPT-4o Mini for improved accuracy and lower cost.",
-          "Added placeholder implementation for Google Cloud STT provider for future expansion."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-06-18",
-        "version": "0.5.4",
-        "changes": [
-          "Enhanced transcription UI with granular feedback for 'Transcribing' and 'Cleaning' stages, and allowed cancellation during these new phases.",
-          "Improved transcription robustness by falling back to the original text if AI cleaning fails, with a UI warning to notify the user.",
-          "Added a configurable `cleaning_timeout` to settings and fixed a potential crash by adding the `tenacity` dependency."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-06-10",
-        "version": "0.5.3",
-        "changes": [
-          "Implemented API timeouts for transcription (Whisper) and text cleaning (LiteLLM) to prevent the application from hanging during processing.",
-          "Added improved user feedback on timeout errors with clear messaging and retry functionality."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-03-21",
-        "version": "0.5.2",
-        "changes": [
-          "Added `run_voice_typing.bat` for easier application launching.",
-          "Tested and improved update process where users run `setup.bat` and choose 'Y' to check for updates.",
-          "Refined text cleaning prompt for better transcription cleaning on smaller models."
-        ]
-      },
-      {
-        "category": "General",
-        "date": "2025-03-21",
-        "version": "0.5.1",
-        "changes": [
-          "Added version tracking and changelog.",
-          "Simplified setup to only require an OpenAI API key for full functionality.",
-          "Migrated to LiteLLM for multi-provider/model support for text cleaning.",
-          "Fixed an issue with `settings.json` initialization and handling.",
-          "Improved the `setup.bat` script with better error handling."
-        ]
-      }
-    ]
-  }
+    {
+      "category": "General",
+      "date": "2026-08-13",
+      "changes": [
+        "Meeting and Phone mode sessions now acknowledge every caps-lock send in the recording indicator: the label immediately shows 'transcribing…' while the chunk is processed (recording continues), 'N queued' if sends stack up, a brief 'pasted' confirmation once the text lands at the cursor, and 'nothing new to send' when a send is skipped because nothing was said since the last one.",
+        "Sending a chunk in Meeting/Phone mode now restarts microphone capture before analyzing the sealed chunk instead of after, shrinking the short gap at each chunk boundary where speech could be missed.",
+        "Microphone menu overhaul: the checkmark now moves immediately when you select a device, favorite microphones are pinned to the top of the Select Device list, and favorites/selection are matched by device name so they no longer silently stop matching when a device reports different specs.",
+        "'Refresh Devices' now performs a real rescan, so microphones plugged in or removed while the app is running actually appear (previously the list was frozen at startup). The saved microphone selection is re-resolved after each rescan.",
+        "The default-device marker in the microphone menu now always points at the actual Windows default input device; previously it followed whatever device you had selected.",
+        "Changing the microphone during a Meeting/Phone session now takes effect immediately by sending the current chunk and continuing on the new device.",
+        "The session preamble (first chunk of a Meeting/Phone session) now also briefs the reading AI on how to collaborate: act as a silent advisor, explore relevant context as the conversation progresses, keep replies brief, and bold anything it wants said aloud.",
+        "The microphone list no longer shows each device 3-5 times: Windows exposes every device once per audio host API (some with names cut off at 31 characters), and the menu now lists each physical device exactly once under its full name, matching what Windows Sound settings shows. Recording still automatically uses the resampling-capable variant of the chosen device behind the scenes, so all recording sample rates keep working. Saved device selections and favorites with truncated names are upgraded automatically when unambiguous."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-07-31",
+      "version": "0.8.0",
+      "changes": [
+        "ElevenLabs Scribe v2 is now the preferred dictation provider: stt_provider defaults to null (automatic), which picks ElevenLabs when ELEVENLABS_API_KEY is configured and OpenAI otherwise — so OpenAI-only setups keep working unchanged, and unfilled .env placeholder values are ignored. In WER benchmarks on dictation-style speech, Scribe v2 was noticeably more accurate than gpt-4o-transcribe (12.25% vs 17.07%). Settings still pinned to the old hardcoded OpenAI default are moved to automatic once; an explicit provider choice made afterwards (including the new 'Automatic' option in the tray provider menu) always sticks.",
+        "The ElevenLabs dictation path now honors the stt_language setting instead of always transcribing as English.",
+        "A recording device failure mid-session (e.g. microphone unplugged) no longer discards the session's already-captured audio: queued chunks still transcribe and deliver in order, audio captured since the last send is salvaged into the queue, and the error is reported accurately instead of as 'No audio detected'. A device failure during normal dictation likewise transcribes what was captured.",
+        "Fixed the updater always re-downloading the app even when up to date (release tags carry a 'v' prefix that was never stripped before comparing versions), and made it preserve the legacy modules/settings.json so updating directly from v0.6.x or older no longer loses your settings.",
+        "Meeting Mode and Phone Mode now have a dedicated plain-language guide at docs/conversation-modes.md covering the session model, speaker labels, and voice matching; the README sections were condensed to overviews.",
+        "Repo cleanup for open-source hygiene: removed stale internal design docs and editor config files, moved maintainer notes out of this changelog, fixed an outdated settings-file path in the troubleshooting guide, and corrected a stale repository link in the README.",
+        "Security: updated Pillow to 12.3.0, resolving all 13 open Dependabot alerts (10 high, 3 moderate)."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-07-22",
+      "changes": [
+        "Meeting Mode and Phone Mode now record as continuous sessions: pressing Caps Lock no longer stops the recording — it sends everything captured since the last press for transcription and recording resumes immediately (sub-second gap mic-only; up to a couple of seconds in Meeting Mode while the 2-channel file is composed), so no conversation audio is lost while waiting for a transcript mid-call.",
+        "Chunks transcribe concurrently in the background but their transcripts are inserted at the cursor strictly in order — a fast later chunk waits for a slow earlier one, so the assembled transcript always reads chronologically.",
+        "To end a session, click the recording indicator or toggle the mode off in the tray; audio captured since the last send is discarded by design (press Caps Lock first to keep it). The indicator label now reads 'caps=send · click=end' in these modes.",
+        "Phone Mode chunk transcripts are prefixed with a '--- [chunk N] ---' header because diarization speaker labels are assigned per request and can swap identities between chunks; the header signals that labels only hold within a chunk.",
+        "A chunk that fails to transcribe retries once automatically (with a note shown in the recording label), and if it fails again its audio is kept for Retry Last Transcription in the tray while the session carries on; the snapshot sweeper no longer touches chunk files that are still queued.",
+        "Quiet chunks (nothing said since the last send) are skipped silently instead of flashing an error, the silent-start auto-cancel only applies to a session's first chunk, and hitting the max recording duration mid-session auto-sends the chunk and keeps recording instead of stopping.",
+        "Phone Mode transcripts are now unlabeled by default: speaker turns still get their own lines, but the generic 'Speaker N' labels — which are assigned per chunk and can swap identities between chunks of a session — are dropped. Set phone_speaker_labels: true in settings.json to restore them.",
+        "The first chunk delivered in a meeting/phone session is prefixed with a short bracketed transcript-limitations note addressed to whoever reads the paste (typically an AI assistant): proper nouns, abbreviations, and speaker attribution may be wrong, so interpret quietly from context without surfacing corrections. Disable via session_preamble: false in settings.json.",
+        "Hardened the session machinery after an independent review: a draining session queue can no longer alter a later dictation's status or retry candidate, cancelling a dictation no longer discards queued session chunks, snapshot enumeration tolerates chunk files deleted mid-scan, the recorder watchdog is token-scoped so duplicate polling chains can't double-fire stop/flush, mode toggles are atomic with session start/end, a cancelled chunk no longer burns a retry API call, and a dismissing warning can no longer hide the indicator while a recording is live.",
+        "Phone Mode can now identify YOUR voice via ElevenLabs' workspace speaker library (dashboard: Speech to Text -> Speakers): enroll 10-60s of solo audio and set phone_my_speaker_id to your registered Speaker ID, and matched words return that ID instead of speaker_N (verified empirically), giving stable 'Me:' / 'Them:' labels across all session chunks. Other enrolled speakers are labeled by their prettified slug; if no voice matches in a chunk, output falls back to unlabeled turns. Controlled by use_speaker_library (default true; harmless no-op when the library is empty).",
+        "Added phone_diarization_threshold (default 0.3), which replaces the phone_num_speakers hint when set. A seeded 0.1-0.4 sweep on a 4-speaker meeting recording showed the parameter also gates speaker-library match acceptance: diarization clusters were identical at every value, but the enrolled speaker only matched at thresholds >= 0.26 (~98% word accuracy, stable through 0.4) while the API default (~0.22) rejected the match entirely. 0.3 sits mid-plateau with margin. The session preamble now explains the Me/Them voice-matched labels when phone_my_speaker_id is configured."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-07-21",
+      "changes": [
+        "Added Phone Mode (tray menu toggle) for conversations happening in the room — a call on speakerphone or an in-person chat where all voices reach the microphone. Recording stays mic-only and transcripts come back diarized with 'Speaker 1:' / 'Speaker 2:' labels in order of first appearance. Requires ELEVENLABS_API_KEY in .env.",
+        "Phone recordings are tagged via WAV metadata so they route to ElevenLabs Scribe voice diarization even across retries and app restarts; the expected speaker count is configurable via phone_num_speakers in settings.json (default 2).",
+        "Meeting Mode and Phone Mode are mutually exclusive — enabling one automatically turns the other off. LLM transcript cleaning is skipped for phone recordings to preserve speaker labels, same as meeting recordings.",
+        "The recording indicator now shows a mode-specific color and label while recording: crimson-pink 'Recording meeting' for Meeting Mode and violet 'Recording call' for Phone Mode, so the active mode is visible at a glance without clashing with the other status colors (blue processing, indigo transcribing, teal cleaning, orange error).",
+        "Added Streaming Dictation (Beta, Settings menu toggle): normal dictation is transcribed over an OpenAI Realtime websocket while you are still speaking, so text is ready ~1-3 seconds after you stop regardless of recording length (previously the wait grew with clip length). Applies to normal mode only; Meeting and Phone modes keep their batch pipelines.",
+        "Streaming recordings are captured at 24 kHz to match the Realtime API's PCM format, and the WAV file is still written in parallel: if the websocket fails at any point (connect, mid-recording, or during the final flush) the app falls back to the regular batch upload automatically, so streaming can only make transcription faster, never less reliable.",
+        "The streaming session flushes the final speech turn with synthetic silence before closing, preventing the last sentence from being cut off when recording stops immediately after the last word.",
+        "Fixed the streaming session dying on speech turns longer than ~10 seconds: the websocket read timeout was treated as fatal, but the server legitimately sends no events during a long uninterrupted turn.",
+        "Tuned streaming VAD defaults after WER benchmarking (st-vtt-bench): lowered the speech-detection threshold from 0.5 to 0.3 and disabled near-field noise reduction, which together were silently discarding quiet and phone-bandwidth speech (86% word loss on a phone-call sample; now captures it).",
+        "Switched streaming turn detection from energy-based server_vad to semantic_vad (model-based) after further benchmarking: on casual dictation audio it cut missed words from ~16% to ~4% and brought overall streaming WER below even the batch gpt-4o-transcribe pipeline (15.1% vs 17.1%), while matching batch on clean narration (2.7%). Tail-capture verified 3/3 with the new turn detector."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-07-20",
+      "changes": [
+        "Added Meeting Mode (tray menu toggle): Caps Lock recordings capture your microphone plus system audio (whatever you hear) as separate channels, and transcripts come back speaker-labeled ('Me:' / 'Them:') — ideal for capturing both sides of a call. Requires ELEVENLABS_API_KEY in .env.",
+        "Meeting recordings are transcribed with ElevenLabs Scribe v2 multichannel mode, attributing speakers by channel (your mic is always 'Me') instead of relying on voice diarization; speaker labels are configurable via meeting_speaker_you/meeting_speaker_them in settings.json.",
+        "If system-audio capture is unavailable (e.g. output device issues), meeting-mode recordings fall back to normal mic-only dictation automatically.",
+        "Silent-start auto-cancel is skipped in meeting mode so clips where only the other party is speaking are not discarded; LLM transcript cleaning is also skipped to preserve speaker labels."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-07-11",
+      "version": "0.7.1",
+      "changes": [
+        "Security: updated litellm (2 critical, 4 high CVEs), Pillow (3 high, 2 medium), requests, and python-dotenv to patched versions, resolving all 13 open Dependabot alerts.",
+        "Updated the OpenAI SDK to 2.x as required by the new litellm version; transcription behavior is unchanged.",
+        "Saved llm_model values without a provider prefix (e.g. 'claude-3-5-haiku-latest') are migrated to prefixed form ('anthropic/...') since newer litellm versions no longer infer the provider."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-07-11",
+      "version": "0.7.0",
+      "changes": [
+        "Fixed canceling an in-flight transcription leaving the indicator stuck on a pulsing status; canceling now resets the UI immediately.",
+        "Fixed a race where canceling a recording by clicking the indicator and immediately pressing Caps Lock could start a new recording while the previous one was still shutting down.",
+        "Fixed retrying a transcription racing with new recordings, which could delete or swap the audio file mid-retry.",
+        "Crash recovery now keeps the newest completed snapshot as a retry fallback instead of deleting it in favor of a possibly-partial temp recording.",
+        "Removed the unused Google STT placeholder provider, the never-implemented Smart Capture stub, and legacy dead code; saved settings referencing them are migrated automatically.",
+        "Fixed a disk leak where every recording was snapshotted to temp_audio.wav.N.wav and never deleted; the app now keeps only the most recent recording for retry and sweeps stale snapshots at startup.",
+        "Fixed thread-safety throughout the UI: all tkinter updates from the audio, processing, hotkey, and tray threads are now marshalled onto the main thread, eliminating a class of intermittent indicator freezes and glitches.",
+        "Fixed the status pulse animation accumulating multiple timers across status transitions, which caused accelerating flicker.",
+        "Fixed the audio level bar disappearing when a recording started while a warning message was showing.",
+        "Made Settings a shared singleton and moved settings.json to Documents/VoiceTyping (with automatic migration), fixing a bug where different modules could silently revert each other's saved settings.",
+        "Added a single-instance guard (named mutex) so launching the app twice no longer results in two competing keyboard hooks and tray icons.",
+        "Recordings are now uploaded as FLAC (lossless, roughly 40-50% smaller than WAV), reducing transcription latency and doubling the effective recording length under OpenAI's 25 MB upload cap.",
+        "Deferred heavy imports (litellm, OpenAI SDK) and cached transcriber clients, cutting app startup time by over 5 seconds and saving connection setup time on every transcription.",
+        "Added a max_recording_duration setting (default 15 minutes) that auto-stops and still transcribes, instead of silently failing on oversized uploads.",
+        "The recording indicator now shows elapsed recording time.",
+        "Transcription history is now persisted to Documents/VoiceTyping/history.json (last 50 entries with timestamps) so dictations survive restarts and crashes.",
+        "Added 'Open Settings File' and 'Open Logs Folder' items to the tray Settings menu.",
+        "Clipboard restore after pasting no longer wipes non-text clipboard content (images/files) and its delay is configurable via clipboard_restore_delay_ms.",
+        "The Google STT placeholder now raises an error instead of pasting placeholder text; custom STT endpoints use a fast connect timeout and remember the working endpoint.",
+        "Replaced console print calls with logger calls so errors are no longer lost to the hidden console window, and added a log_transcript_text setting to optionally keep transcript text out of log files."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-07-23",
+      "version": "0.6.6",
+      "changes": [
+        "Improved the workaround for OpenAI's transcription cut-off issue by replacing silent padding with more effective brown noise padding."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-07-21",
+      "version": "0.6.5",
+      "changes": [
+        "Fixed run_voice_typing.bat file having Unix line endings in the repository, which could cause issues on Windows systems when downloaded directly from GitHub. Thanks to @Theo-Deffenbaugh for reporting this issue.",
+        "Added .gitattributes file to ensure batch files always maintain Windows line endings (CRLF) in the repository, preventing future line ending issues."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-07-17",
+      "version": "0.6.4",
+      "changes": [
+        "Added a 'mini' UI mode for a more compact recording indicator, configurable via tray settings and the new `ui_indicator_size` setting in `settings.json`.",
+        "Added `top-center` and `bottom-center` UI indicator positions and applied an offset to bottom positions to prevent being obscured by the taskbar.",
+        "Reorganized the 'Recording Indicator' tray menu to group size and position settings for better usability."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-07-17",
+      "version": "0.6.3",
+      "changes": [
+        "Fixed Python version compatibility checks in setup.bat and documentation to explicitly require Python 3.10-3.12, addressing Pillow wheel availability issue reported by @Theo-Deffenbaugh.",
+        "Fixed the retry transcription functionality to remain available even after successful transcriptions, allowing users to retry when transcription results are inaccurate.",
+        "The retry button now stays enabled until a new recording is started, enabling multiple retry attempts for the same audio."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-07-08",
+      "version": "0.6.2",
+      "changes": [
+        "Improved application restart reliability by using `subprocess.Popen` to preserve the virtual environment context.",
+        "Fixed the silent-start timeout feature to correctly respect user settings.",
+        "Added a 'Fine-Tuning' section to the README to document advanced user-configurable settings.",
+        "Attempted fix for issue with native caps lock functionality being activated randomly.",
+        "Implemented automatic log file cleanup with a configurable `log_retention_days` setting to manage disk space."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-06-23",
+      "version": "0.6.1",
+      "changes": [
+        "Implemented a temporary workaround to fix transcription cut-off issues with OpenAI's gpt-4o models by padding audio with a short silence."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-06-22",
+      "version": "0.6.1",
+      "changes": [
+        "Enhanced microphone handling to log the active recording device on startup and selection, and fixed a sync issue between settings and the tray menu display.",
+        "Fixed a Unicode encoding error in console logging on Windows to correctly display emoji characters.",
+        "Refactored logging setup into a dedicated `modules/logger.py` file for improved code organization.",
+        "Refined transcription logging for clarity by consolidating provider/model details and adding a preview of the transcribed text upon completion.",
+        "Fixed UI indicator positioning to correctly align on the primary monitor in multi-display setups.",
+        "Added a 'UI Indicator Position' setting to the tray menu, allowing users to select a corner for the indicator.",
+        "Added configurable `silence_threshold` in `settings.json` to fix transcription issue#2.",
+        "Added a `Troubleshooting` section to README.md for the new setting.",
+        "Improved logging by including RMS values on discarded audio and fixing `.pyw` output."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-06-22",
+      "version": "0.6.0",
+      "changes": [
+        "Renamed 'Auto-Stop on Silence' setting to 'Silent-Start Timeout' for clarity and added an automatic migration for existing user settings.",
+        "Updated README.md with new information and added a migration guide."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-06-21",
+      "version": "0.6.0",
+      "changes": [
+        "🎉 Implemented multi-provider Speech-to-Text framework with support for OpenAI's new GPT-4o Transcribe models.",
+        "Added provider selection in the tray menu under Settings → Speech-to-Text → Provider.",
+        "Added model selection for OpenAI STT with Whisper, GPT-4o, and GPT-4o Mini options.",
+        "Implemented Strategy and Factory patterns for flexible STT provider architecture, making it easy to add new providers.",
+        "Updated default transcription model from Whisper to GPT-4o Mini for improved accuracy and lower cost.",
+        "Added placeholder implementation for Google Cloud STT provider for future expansion."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-06-18",
+      "version": "0.5.4",
+      "changes": [
+        "Enhanced transcription UI with granular feedback for 'Transcribing' and 'Cleaning' stages, and allowed cancellation during these new phases.",
+        "Improved transcription robustness by falling back to the original text if AI cleaning fails, with a UI warning to notify the user.",
+        "Added a configurable `cleaning_timeout` to settings and fixed a potential crash by adding the `tenacity` dependency."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-06-10",
+      "version": "0.5.3",
+      "changes": [
+        "Implemented API timeouts for transcription (Whisper) and text cleaning (LiteLLM) to prevent the application from hanging during processing.",
+        "Added improved user feedback on timeout errors with clear messaging and retry functionality."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-03-21",
+      "version": "0.5.2",
+      "changes": [
+        "Added `run_voice_typing.bat` for easier application launching.",
+        "Tested and improved update process where users run `setup.bat` and choose 'Y' to check for updates.",
+        "Refined text cleaning prompt for better transcription cleaning on smaller models."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2025-03-21",
+      "version": "0.5.1",
+      "changes": [
+        "Added version tracking and changelog.",
+        "Simplified setup to only require an OpenAI API key for full functionality.",
+        "Migrated to LiteLLM for multi-provider/model support for text cleaning.",
+        "Fixed an issue with `settings.json` initialization and handling.",
+        "Improved the `setup.bat` script with better error handling."
+      ]
+    }
+  ]
+}

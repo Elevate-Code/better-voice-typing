@@ -38,8 +38,10 @@ def _load_env_files() -> None:
     Keys live in Documents\\VoiceTyping\\.env. On first run after 1.0 an
     app-folder .env from an earlier version is moved there; if there is no
     .env at all, the template is copied so "Open API Keys" in the tray has a
-    file to open. The app-folder location is still read as a fallback (it
-    never overrides a value already loaded)."""
+    file to open. Values in that file win over same-named variables in the
+    Windows environment (a stale machine-wide OPENAI_API_KEY used to silently
+    take precedence); the app-folder location is still read as a fallback
+    and never overrides anything."""
     try:
         if not ENV_FILE.exists():
             SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,7 +53,7 @@ def _load_env_files() -> None:
                 startup_notes.append(f"Created API keys file from template at {ENV_FILE}")
     except OSError as e:
         startup_notes.append(f"Could not set up the API keys file: {e}")
-    load_dotenv(ENV_FILE)
+    load_dotenv(ENV_FILE, override=True)
     load_dotenv(_LEGACY_ENV_FILE)
 
 
@@ -165,6 +167,8 @@ class Settings:
             'ui_indicator_size': 'normal',  # 'normal', 'mini'
             'ui_indicator_all_displays': True,  # Show indicator on all monitors
             'tray_pinned_exe': None,  # Executable whose tray icon the app already promoted out of the overflow
+            'sounds_enabled': False,  # Soft cue when recording starts/stops
+            'setup_completed': None,  # App version whose first-run setup was finished; null = show it
 
             # Logging
             'log_retention_days': 60,

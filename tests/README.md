@@ -1,8 +1,8 @@
 # Tests
 
 ```powershell
-uv pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pytest
+uv sync        # dev group included by default
+uv run pytest  # config lives in pyproject.toml
 ```
 
 ## What belongs here
@@ -20,13 +20,13 @@ it doesn't belong here.
 
 ## Ground rules
 
-- **No hardware, no network, no Tk, no global keyboard hooks.** Everything a
+- **No hardware, no network, no Qt widgets, no global keyboard hooks.** Everything a
   test touches is driven by fakes: raw hook messages instead of pynput,
   callables instead of provider SDKs, an injected clock instead of sleeping.
 - **Every test names its race.** The docstring says which sequence of events
   it replays and what must (not) happen.
 - **A hang is a failure.** `pytest-timeout` is on for every test (see
-  `pytest.ini`); tests that need to wait use short bounded polls.
+  `pyproject.toml`); tests that need to wait use short bounded polls.
 - **Refactors add seams, not mocks.** If production code can't be tested
   without patching internals, the fix is an injectable parameter (clock,
   delay, transcribe function), not `monkeypatch` of private attributes.
@@ -42,7 +42,9 @@ it doesn't belong here.
 | `test_fileutil.py` | Settings and history writes are atomic and recover from `.bak` after a torn write. |
 | `test_audio_markers.py` | A recording file alone says dictation / meeting / phone, surviving snapshots and restarts. |
 | `test_custom_stt.py` | Pre-1.0 custom STT base URLs keep working (`/v1` appended), no OpenAI key needed. |
-| `test_tray_menu.py` | Tray menu items are accepted by pystray at construction (one bad item kills the whole icon). |
+| `test_tray_menu.py` | The tray menu builds as a plain item tree without a display, and every item carries a zero-argument action. |
+| `test_env_file.py` | Editing keys from the settings window changes only the requested lines of `.env`, keeps everything else verbatim, and updates the running process. |
+| `test_indicator_label.py` | The recording label keeps its shape ("🎤 Recording  1:05", note between text and clock). |
 | `test_settings_migrations.py` | Every historical settings.json shape loads into the current schema, idempotently, keeping the user's choices and unknown keys. |
 | `test_realtime_stt.py` | Streaming dictation raises (so batch takes over) after any lost turn or server error, and commits after all buffered audio. |
 | `test_updater.py` | The updater never runs an installer whose checksum doesn't match the release, compares versions numerically, and the helper waits for our PID. |

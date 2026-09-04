@@ -56,6 +56,31 @@ def write_json_atomic(path: PathLike, data: Any, *, indent: int = 4,
                 pass
 
 
+def write_text_atomic(path: PathLike, text: str) -> None:
+    """Replace ``path`` with ``text`` (temp file + fsync + rename), keeping a
+    .bak of the previous content like write_json_atomic."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + '.tmp')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            try:
+                shutil.copyfile(path, backup_path(path))
+            except OSError:
+                logger.warning(f"Could not refresh backup for {path.name}", exc_info=True)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def read_json_with_backup(path: PathLike, default: Any) -> Any:
     """Parse ``path``; if it is missing or corrupt, try its ``.bak``; else ``default``.
 

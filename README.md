@@ -54,19 +54,13 @@ Toggle **Streaming Dictation** under Settings to transcribe *while you speak* ov
 - Realtime models trade a little accuracy for speed: each speech segment is transcribed as you go, without the full-recording context the batch model gets. Hence the Beta label — turn it off if you notice quality dips.
 - Fail-safe by design: the audio file is still recorded in parallel, and any streaming failure (connection, mid-recording drop, quota) falls back to the normal batch upload automatically.
 
-### Tray Options/Settings
-- Retry Last Transcription: Attempts to re-process the last audio recording, useful if the first attempt failed or was inaccurate.
-- Recent Transcriptions: Access previous transcriptions, copy to clipboard.
-- Microphone Selection: Choose your preferred input device.
-- Settings:
-  - Clean Transcription: Enable/disable further refinement of the transcription using a configurable LLM.
-  - Streaming Dictation (Beta): Transcribe while recording for near-instant results (see above).
-  - Silent-Start Timeout: Cancels the recording if no sound is detected within the first few seconds, preventing accidental recordings.
-  - Recording Indicator: Customize size, position, and multi-monitor display of the recording indicator.
-  - Speech-to-Text: Select your STT provider (ElevenLabs Scribe, OpenAI, Custom/Local) and model.
-  - Output Mode: Choose how text is inserted (see Plugins below).
-  - Open Settings File / Open Logs Folder: Quick access to configuration and logs.
-- Restart: Quickly restart the application, like when it's not responding to the keyboard shortcut.
+### Main window & tray menu
+Left-click the tray icon (or right-click → **Open Better Voice Typing**) for the main window:
+- **Home**: which provider and microphone are active, the controls, and a button to rerun the first-run setup.
+- **History**: your recent transcriptions with timestamps; copy any of them, or retry the last recording.
+- **General / Dictation / Conversation / Indicator / Advanced**: every setting — API keys (with a Test button), microphone with a live level meter, start at sign-in, sounds, language, provider and model, custom/local server, streaming, silent-start timeout, maximum recording length, optional LLM cleanup, Meeting/Phone options, indicator position and size, log options, updates.
+
+The right-click tray menu keeps the quick actions: Copy / Retry Last Transcription, Recent Transcriptions, Microphone, Meeting/Phone mode toggles, Quick Settings (cleanup, streaming, silent-start, indicator, provider, and the settings/.env/logs files), Check for Updates, Restart, Exit.
 
 ### Tray History
 - Keeps track of recent transcriptions
@@ -166,12 +160,12 @@ CUSTOM_STT_API_KEY="your-api-key-here"
    > **Windows will warn you the first time you run the installer.** It isn't code-signed: signing certificates cost money and require identity verification, and this is a free hobby project. You'll see "Windows protected your PC". Click **More info**, then **Run anyway**. Updates from inside the app won't show this again. Prefer to see the code first? Install from source below; it runs the same code without the one-click installer.
 
 2. Run the installer. It installs for your user only (no admin prompt) into `%LOCALAPPDATA%\Programs\Better Voice Typing`, adds a Start menu entry, and by default starts the app when you sign in to Windows.
-3. A microphone icon appears in the system tray. Right-click it → **Open API Keys (.env)**, add at least one speech-to-text API key (not needed only if you run a local Custom STT server — see below), save, then tray icon → **Restart**:
+3. A setup window opens on the first launch. Paste at least one speech-to-text API key and press **Test** (not needed only if you run a local Custom STT server — see below), check that the microphone meter moves when you talk, then try a dictation:
    - ElevenLabs API key ([get one here](https://elevenlabs.io/app/settings/api-keys)) — recommended: best dictation accuracy, and required for Meeting/Phone modes
-   - and/or OpenAI API key ([get one here](https://platform.openai.com/api-keys)) — also enables Streaming Dictation and transcript cleaning
+   - or OpenAI API key ([get one here](https://platform.openai.com/api-keys)) — also enables Streaming Dictation
 
-   Your keys, settings and history live in `Documents\VoiceTyping\`, so they survive updates and reinstalls.
-4. 💡 Make the tray icon always visible: right-click the taskbar → "Taskbar settings" → "Other system tray icons" → toggle on Better Voice Typing.
+   Your keys, settings and history live in `Documents\VoiceTyping\`, so they survive updates and reinstalls. You can rerun the setup any time from the main window's Home page.
+4. The microphone icon next to the clock is the app; it pins itself as always visible on Windows 11. If Windows ever hides it behind the `^` arrow, drag it back out.
 
 ### Updating
 
@@ -199,7 +193,7 @@ If you still want to use the post-processing feature:
 ## Development
 
 1. Clone the repo and run `uv sync` (creates `.venv` with the locked dependencies, dev tools included)
-2. Run the app once; it creates `Documents\VoiceTyping\.env` from `.env.example` (an app-folder `.env` from older versions is moved there automatically) — add your keys there
+2. Run the app once; the setup window asks for your keys and writes them to `Documents\VoiceTyping\.env` (an app-folder `.env` from older versions is moved there automatically)
 3. Run the app from the command line (`--debug` keeps the console and verbose logs):
    ```
    .\.venv\Scripts\python.exe .\voice_typing.pyw --debug

@@ -51,6 +51,11 @@ class TranscriptionHistory:
     def get_recent(self) -> List[str]:
         return list(reversed(self.history))
 
+    def entries(self) -> List[dict]:
+        """All persisted entries ({'text', 'timestamp'}), newest first."""
+        with self._lock:
+            return list(reversed(self._entries))
+
     def get_preview(self, text: str, max_length: int = 30) -> str:
         """Returns truncated preview of text for menu display"""
         if len(text) <= max_length:

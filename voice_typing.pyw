@@ -24,6 +24,7 @@ from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
 from modules.session import ConversationSession, SessionNotes
 from modules.settings import Settings, api_key_configured
 from modules.settings import startup_notes as settings_startup_notes
+from modules.sounds import play_if_enabled
 from modules.transcribe import transcribe_audio, is_conversation_recording
 from modules.tray import setup_tray_icon
 from modules.tray_pin import promote_tray_icon
@@ -110,6 +111,8 @@ class VoiceTypingApp:
         self._toggle_lock = threading.RLock()
         # Held for the process lifetime; released explicitly only on restart
         self._instance_mutex: Optional[int] = None
+        # Settings / setup / history window, created on first open
+        self._main_window = None
 
         # Log settings information
         self.logger.info(f"Application settings:\n{json.dumps(self.settings.current_settings)}")
@@ -365,6 +368,7 @@ class VoiceTypingApp:
                 self.last_recording = None
                 self.recording = True
                 self.recorder.start()
+                play_if_enabled(self.settings, 'start')
                 self.status_manager.set_status(self._active_recording_status)
                 self._watchdog_token += 1
                 token = self._watchdog_token
@@ -392,6 +396,7 @@ class VoiceTypingApp:
                 return
             self.recording = False
             self.recorder.stop()
+            play_if_enabled(self.settings, 'stop')
             self.logger.info("Recording stopped")
 
             # Detach the streaming session from app state; from here it either
@@ -505,6 +510,7 @@ class VoiceTypingApp:
             self.recorder.continuation_chunk = False
             try:
                 self.recorder.stop()
+                play_if_enabled(self.settings, 'stop')
             except Exception:
                 self.logger.error("Error stopping recorder", exc_info=True)
             self.recorder.auto_stopped = False
@@ -1019,6 +1025,8 @@ class VoiceTypingApp:
         self.listener.start()
         self.ui_feedback.after(4000, self._pin_tray_icon)
         self._schedule_startup_update_check()
+        if self.settings.get('setup_completed') is None:
+            self.ui_feedback.after(800, lambda: self.show_main_window(setup=True))
 
         # Qt main loop, on the main thread
         try:
@@ -1075,6 +1083,7 @@ class VoiceTypingApp:
                 self._streaming_session = None
             try:
                 self.recorder.stop()
+                play_if_enabled(self.settings, 'stop')
             except Exception:
                 self.logger.error("Error stopping recorder", exc_info=True)
             self.status_manager.set_status(AppStatus.IDLE)
@@ -1110,9 +1119,15 @@ class VoiceTypingApp:
         status = "enabled" if new_timeout is not None else "disabled"
         self.logger.info(f"Silence detection {status}")
 
-    def show_main_window(self) -> None:
-        """Open (or raise) the main window. Called from the tray on the main thread."""
-        self.logger.info("Main window requested (not implemented yet)")
+    def show_main_window(self, setup: bool = False) -> None:
+        """Open (or raise) the main window; ``setup`` starts the first-run
+        pages. Thread-safe: the window is created lazily on the main thread."""
+        def impl() -> None:
+            if self._main_window is None:
+                from modules.main_window import MainWindow
+                self._main_window = MainWindow(self)
+            self._main_window.open(setup=setup)
+        self.ui_feedback.call_on_main(impl)
 
     def restart_app(self) -> None:
         """Restart the application by launching a new instance and closing the current one."""

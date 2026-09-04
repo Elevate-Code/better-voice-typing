@@ -32,8 +32,12 @@ VALID_POSITIONS = frozenset({
 })
 VALID_SIZES = frozenset({'normal', 'mini'})
 
-# Audio level is applied coalesced at this rate (the callback only stores it)
-LEVEL_APPLY_MS = 33
+# The level meter eases toward the latest audio level at this rate (the audio
+# callback only stores the target), so the bar moves smoothly regardless of
+# the capture block size
+LEVEL_APPLY_MS = 16
+LEVEL_ATTACK = 0.55   # fraction of the gap closed per tick when rising
+LEVEL_RELEASE = 0.22  # ...and when falling
 PULSE_MS = 500
 SWEEP_MS = 33
 NOTICE_COLOR = '#FFA500'
@@ -186,17 +190,21 @@ class UIFeedback:
         self._pulse_phase = 0
         self._sweep_phase = 0.0
         self._pending_level: Optional[float] = None
+        self._level_target = 0.0
+        self._level_shown = 0.0
         self._recording_started: Optional[float] = None
         self._recording_note = ''
         self._notice_active = False
 
         self._level_timer = QTimer()
+        self._level_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._level_timer.setInterval(LEVEL_APPLY_MS)
         self._level_timer.timeout.connect(self._apply_level)
         self._pulse_timer = QTimer()
         self._pulse_timer.setInterval(PULSE_MS)
         self._pulse_timer.timeout.connect(self._pulse)
         self._sweep_timer = QTimer()
+        self._sweep_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._sweep_timer.setInterval(SWEEP_MS)
         self._sweep_timer.timeout.connect(self._sweep)
         self._tick_timer = QTimer()
@@ -385,12 +393,18 @@ class UIFeedback:
         self._pending_level = level
 
     def _apply_level(self) -> None:
-        level = self._pending_level
-        if level is None or not self.pulsing or self._notice_active:
+        if not self.pulsing or self._notice_active:
             return
-        self._pending_level = None
+        pending = self._pending_level
+        if pending is not None:
+            self._pending_level = None
+            self._level_target = min(1.0, max(0.0, pending))
+        gap = self._level_target - self._level_shown
+        if abs(gap) < 0.003:
+            return
+        self._level_shown += gap * (LEVEL_ATTACK if gap > 0 else LEVEL_RELEASE)
         for w in self.indicators:
-            w.level = level
+            w.level = self._level_shown
             w.update()
 
     def _pulse(self) -> None:
@@ -432,6 +446,8 @@ class UIFeedback:
         self._pulse_timer.stop()
         self._level_timer.stop()
         self._sweep_timer.stop()
+        self._level_target = self._level_shown = 0.0
+        self._pending_level = None
         for w in self.indicators:
             w.level = 0.0
             w.sweep = None
