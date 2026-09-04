@@ -12,7 +12,6 @@ import json
 from pynput import keyboard
 import pyperclip
 
-from modules.chunk_queue import ChunkQueue
 from modules.clean_text import clean_transcription
 from modules.error_messages import (
     CANCELLED, NO_RECORDING, TranscriptionFailure, describe_transcription_error,
@@ -20,6 +19,7 @@ from modules.error_messages import (
 from modules.history import TranscriptionHistory
 from modules.hotkey import CapsLockHotkey, HotkeyAction
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
+from modules.session import ConversationSession, SessionNotes
 from modules.settings import Settings, api_key_configured
 from modules.transcribe import transcribe_audio, is_conversation_recording
 from modules.tray import setup_tray_icon
@@ -66,22 +66,14 @@ class VoiceTypingApp:
 
         # Continuous conversation session (meeting/phone mode): caps lock
         # flushes a chunk and keeps recording; indicator click ends the session.
-        # Recent queues stay sweep-protected while their deliveries drain.
+        # The last session is kept after it ends (its queue may still be
+        # draining); recent sessions stay sweep-protected while they hold files.
         # (Initialized before _recover_last_recording, which sweeps snapshots.)
-        self._session_active = False
-        self._chunk_queue: Optional[ChunkQueue] = None
-        self._recent_queues: list[ChunkQueue] = []
-        # Session-note display model: a routine STATE line (transcribing /
-        # queued / pasted) plus an optional timed ALERT overriding it (chunk
-        # retrying/failed, quiet flush). Alerts expire back to the current
-        # state, so the label can never be left stale. _note_lock serializes
-        # all writers (hook thread, queue workers, expiry timers), which also
-        # keeps UI-queue ordering consistent with note ordering.
-        self._note_lock = threading.Lock()
-        self._note_state = ''
-        self._note_state_seq = 0
-        self._note_alert = ''
-        self._note_alert_until = 0.0
+        self._session: Optional[ConversationSession] = None
+        self._recent_sessions: list[ConversationSession] = []
+        # Recording-indicator note (session state / timed alerts); see
+        # modules/session.py. Also used for the odd mid-recording warning.
+        self._notes = SessionNotes(self.ui_feedback.set_recording_note)
         # Scopes the recorder watchdog to the recording that scheduled it, so
         # a leftover poll from a just-stopped recording can't start a second
         # concurrent chain (which could double-fire stop/flush actions)
@@ -224,7 +216,7 @@ class VoiceTypingApp:
             if self.recording:
                 # show_warning would be repainted over by the recording
                 # pulse/ticker; the recording note is the visible channel here
-                self._set_session_alert("⚠️ can't refresh devices while recording", 3.0)
+                self._notes.set_alert("⚠️ can't refresh devices while recording", 3.0)
                 return
             try:
                 refresh_devices()
@@ -270,8 +262,8 @@ class VoiceTypingApp:
         """Delete snapshot files, keeping the current retry candidate plus any
         chunk files a conversation session's queue still needs."""
         keep_paths = {Path(keep).resolve()} if keep else set()
-        for queue in self._recent_queues:
-            keep_paths.update(Path(p).resolve() for p in queue.active_paths())
+        for session in self._recent_sessions:
+            keep_paths.update(Path(p).resolve() for p in session.active_paths())
         for snapshot in self._snapshot_paths():
             if snapshot.resolve() in keep_paths:
                 continue
@@ -346,9 +338,7 @@ class VoiceTypingApp:
                 # recording continues; clicking the indicator ends the session
                 self.recorder.continuation_chunk = False
                 if self.recorder.meeting_mode or self.recorder.phone_mode:
-                    self._chunk_queue = self._make_chunk_queue(
-                        phone=self.recorder.phone_mode)
-                    self._session_active = True
+                    self._session = self._start_session(phone=self.recorder.phone_mode)
 
                 self.logger.info(f"🎙️ Starting recording...{mode_note}")
                 self.last_recording = None
@@ -442,7 +432,7 @@ class VoiceTypingApp:
             # Acknowledge the caps press right away — the stop/restart and
             # chunk analysis below can take a moment, and the user needs to
             # see the flush registered (recording continues throughout)
-            self._set_session_state("📤 transcribing…", clear_alert=True)
+            self._notes.set_state("📤 transcribing…", clear_alert=True)
             self.recorder.stop()
             self._recording_generation += 1
             gen = self._recording_generation
@@ -455,7 +445,7 @@ class VoiceTypingApp:
                 except OSError:
                     snapshot = None
                     self.logger.error("Could not snapshot chunk; skipping it", exc_info=True)
-                    self._set_session_alert("⚠️ chunk could not be saved", 5.0)
+                    self._notes.set_alert("⚠️ chunk could not be saved", 5.0)
             # Restart capture before analyzing/queueing the sealed chunk: the
             # snapshot is a closed file, so this shrinks the not-recording gap
             # (where spoken words are lost) to just the stop/restart itself
@@ -464,13 +454,13 @@ class VoiceTypingApp:
             if snapshot:
                 is_valid, reason = self.recorder.analyze_recording(snapshot)
                 if is_valid:
-                    index = self._chunk_queue.submit(snapshot)
+                    index = self._session.submit(snapshot)
                     self.logger.info(f"Chunk {index} queued for transcription")
                 else:
                     # Quiet flush (nothing said since the last one): drop it
                     # without the error flash a failed dictation would get
                     self.logger.info(f"Skipping chunk: {reason}")
-                    self._set_session_alert("🔇 nothing new to send", 3.0)
+                    self._notes.set_alert("🔇 nothing new to send", 3.0)
                     try:
                         os.remove(snapshot)
                     except OSError:
@@ -492,12 +482,13 @@ class VoiceTypingApp:
         so a stale end request is dropped; if the fault persists the watchdog
         sees it again on its next tick."""
         with self._toggle_lock:
-            if not self._session_active:
+            session = self._session
+            if session is None or not session.live:
                 return
             if expected_gen is not None and expected_gen != self._recording_generation:
                 self.logger.info("Ignoring stale end-session request for a superseded capture")
                 return
-            self._session_active = False
+            session.live = False
             self.recording = False
             self.recorder.continuation_chunk = False
             try:
@@ -506,15 +497,14 @@ class VoiceTypingApp:
                 self.logger.error("Error stopping recorder", exc_info=True)
             self.recorder.auto_stopped = False
             self.recorder.error = None
-            queue = self._chunk_queue
-            if error and queue is not None and os.path.exists(self.recorder.filename):
+            if error and os.path.exists(self.recorder.filename):
                 # Salvage audio captured before the device failed
                 self._recording_generation += 1
                 snapshot = self.recorder.filename + f".{self._recording_generation}.wav"
                 try:
                     os.replace(self.recorder.filename, snapshot)
                     if self.recorder.analyze_recording(snapshot)[0]:
-                        index = queue.submit(snapshot)
+                        index = session.submit(snapshot)
                         self.logger.info(f"Salvaged session tail as chunk {index} after recording error")
                     else:
                         os.remove(snapshot)
@@ -525,11 +515,10 @@ class VoiceTypingApp:
                     os.remove(self.recorder.filename)
             except OSError:
                 self.logger.warning("Could not delete session tail", exc_info=True)
-            self._reset_session_notes()
+            self._notes.reset()
             if auto_stopped:
                 # First chunk never made a sound; nothing was queued
-                if queue is not None:
-                    queue.cancel()
+                session.cancel()
                 self.status_manager.set_status(
                     AppStatus.ERROR,
                     "⚠️ Recording stopped: No audio detected"
@@ -544,231 +533,70 @@ class VoiceTypingApp:
                     AppStatus.ERROR,
                     "⚠️ Recording error — session ended"
                 )
-                if queue is not None:
-                    queue.close()
+                session.close()
                 return
             self.logger.info("Conversation session ended")
-            if queue is not None:
-                # PROCESSING first, then close(): if the queue is already empty
-                # the drained callback immediately corrects this to IDLE/ERROR
-                self.status_manager.set_status(AppStatus.PROCESSING)
-                queue.close()
-            else:
-                self.status_manager.set_status(AppStatus.IDLE)
+            # PROCESSING first, then close(): if the queue is already empty
+            # the drained callback immediately corrects this to IDLE/ERROR
+            self.status_manager.set_status(AppStatus.PROCESSING)
+            session.close()
 
-    def _make_chunk_queue(self, phone: bool) -> ChunkQueue:
-        """Build the ordered delivery queue for a conversation session.
+    # --- Conversation sessions (modules/session.py) ---------------------------
 
-        Callbacks run on queue worker threads (outside the queue's state lock,
-        serialized in delivery order), so they only touch thread-safe app
-        surfaces and never call back into the queue (data arrives as
-        arguments)."""
-        queue_ref: list = []
-        # Most recent classified chunk failure, so the end-of-session summary
-        # can name the cause instead of just counting casualties
-        last_failure: list = []
-        # Transcript-limitations note for the LLM reading the paste, sent once
-        # per session ahead of whichever chunk is delivered first
-        preamble_pending = [bool(self.settings.get('session_preamble'))]
+    @property
+    def _session_active(self) -> bool:
+        """A meeting/phone session is recording (caps = flush, click = end)."""
+        return self._session is not None and self._session.live
 
-        def build_preamble() -> str:
-            if phone:
-                you = self.settings.get('meeting_speaker_you') or 'Me'
-                them = self.settings.get('meeting_speaker_them') or 'Them'
-                if self.settings.get('phone_my_speaker_id'):
-                    speakers = (f"'{you}:' lines are me (matched by voice) and "
-                                f"'{them}:' is anyone else; in chunks with "
-                                "unlabeled lines the voice match failed, so each "
-                                "line is just one unattributed speaker turn")
-                elif self.settings.get('phone_speaker_labels'):
-                    speakers = ("Speaker turns are labeled 'Speaker N' per chunk, and "
-                                "labels can swap identities between chunks")
-                else:
-                    speakers = ("Each line is one speaker turn, but turns are "
-                                "unattributed — quietly infer who's speaking")
-            else:
-                you = self.settings.get('meeting_speaker_you') or 'Me'
-                them = self.settings.get('meeting_speaker_them') or 'Them'
-                speakers = (f"'{you}:' lines are me and '{them}:' is the other "
-                            "side, though attribution can err on overlapping speech")
-            return (
-                "[Transcript note: a live conversation transcribed by "
-                "voice-to-text, arriving in chunks as the call happens. "
-                f"{speakers}. Proper nouns and abbreviations are often "
-                "mistranscribed — quietly interpret them from context; you "
-                "don't need to surface these corrections to me. I'm in this "
-                "conversation live, so act as my silent advisor: as it "
-                "progresses, feel free to quickly explore for docs or "
-                "context relevant to what's being discussed. I can only "
-                "glance at your replies briefly — keep them short, and put "
-                "anything you want me to actually say or ask in **bold** so "
-                "my eyes are drawn to it.]"
-            )
+    def _start_session(self, phone: bool) -> ConversationSession:
+        session = ConversationSession(
+            phone=phone, settings_get=self.settings.get, notes=self._notes,
+            host=self, transcribe_fn=transcribe_audio)
+        # Sweep protection: keep sessions that still hold files (draining, or
+        # failures kept for retry) rather than capping by count, so a
+        # slow-draining session can't lose its files to a sweep
+        self._recent_sessions = [s for s in self._recent_sessions if s.active_paths()]
+        self._recent_sessions.append(session)
+        return session
 
-        def is_current() -> bool:
-            return queue_ref and queue_ref[0] is self._chunk_queue
+    # SessionHost protocol — the app surfaces a session may touch from its
+    # queue-worker threads. All of these are thread-safe.
 
-        def on_result(index: int, text: str, path: str) -> None:
-            prefix = ""
-            if preamble_pending[0]:
-                preamble_pending[0] = False
-                prefix = build_preamble() + "\n\n"
-            # Chunk headers mark discontinuities (mid-sentence cuts, and in
-            # labeled phone transcripts, where speaker labels reset)
-            header = f"--- [chunk {index}] ---\n" if phone else ""
-            self.history.add(text)
-            self.ui_feedback.insert_text(prefix + header + text + "\n")
-            if self.update_icon_menu:
-                self.update_icon_menu()
-            self.logger.info(f"Chunk {index} delivered ({len(text)} chars)")
-            try:
-                os.remove(path)
-            except OSError:
-                pass
+    def is_current(self, session: ConversationSession) -> bool:
+        return self._session is session
 
-        def on_retrying(index: int) -> None:
-            if self._session_active and is_current():
-                self._set_session_alert(f"⚠️ chunk {index} retrying…", 6.0)
-            elif not self.recording:
-                self.ui_feedback.show_warning(f"⚠️ Chunk {index} failed, retrying…", 3000)
+    def is_recording(self) -> bool:
+        return self.recording
 
-        def on_failed(index: int, path: str, error: Optional[BaseException]) -> None:
-            # Keep the file and point the retry machinery at it (tray "Retry
-            # Last Transcription" copies the result to the clipboard) — unless
-            # a newer dictation is mid-processing, whose own retry candidate
-            # must not be clobbered
-            if not (self.processing_thread and self.processing_thread.is_alive()):
-                self.last_recording = path
-            failure = describe_transcription_error(error) if error else None
-            # Remember the reason so on_drained can explain the whole session
-            if failure and not failure.silent:
-                last_failure.append(failure)
-            reason = f" — {failure.short}" if failure else ""
-            if self._session_active and is_current():
-                self._set_session_alert(f"⚠️ chunk {index} failed{reason}", 6.0)
-            elif not self.recording:
-                self.ui_feedback.show_warning(
-                    f"⚠️ Chunk {index} failed{reason}\n(retry from tray)", 5000)
-            else:
-                # A newer recording owns the indicator; the warning overlay
-                # would hide it when it auto-dismisses, so just log
-                self.logger.warning(f"Chunk {index} from an earlier session failed")
+    def dictation_in_progress(self) -> bool:
+        return bool(self.processing_thread and self.processing_thread.is_alive())
 
-        def on_pending(count: int) -> None:
-            if not (self._session_active and is_current()):
-                return
-            if count == 0:
-                # The last outstanding chunk was just delivered at the cursor
-                self._set_session_state("✅ pasted", decay_s=5.0)
-            elif count == 1:
-                self._set_session_state("📤 transcribing…")
-            else:
-                self._set_session_state(f"⏳ {count} queued")
+    def deliver_text(self, paste: str, transcript: str) -> None:
+        self.history.add(transcript)
+        self.ui_feedback.insert_text(paste)
+        if self.update_icon_menu:
+            self.update_icon_menu()
 
-        def on_drained(failed_paths: list) -> None:
-            if not is_current() or self.recording:
-                return
-            if self.processing_thread and self.processing_thread.is_alive():
-                # A normal dictation is mid-pipeline; it owns the status and
-                # will set IDLE/ERROR itself when it finishes
-                return
-            if failed_paths:
-                self.last_recording = failed_paths[-1]
-                count = f"⚠️ {len(failed_paths)} chunk(s) failed"
-                # Name the cause from the most recent failure; when every chunk
-                # died the same way (quota, key, network) that's the whole story
-                failure = last_failure[-1] if last_failure else None
-                short = f"{count} — {failure.short}" if failure else count
-                overlay = f"{short}\n{failure.hint}".rstrip() if failure else count
-                # Status first, retry overlay second: both repaint the
-                # indicator label in queue order, and only the overlay
-                # carries the hint and the "click to retry" line
-                self.status_manager.set_status(AppStatus.ERROR, short)
-                self.ui_feedback.show_error_with_retry(overlay)
-            elif (self.status_manager.current_status == AppStatus.PROCESSING or
-                  self.status_manager.current_status in RECORDING_STATUSES):
-                # Clear our own post-session PROCESSING state — including the
-                # case where the recording watchdog reasserted a stale
-                # "Recording" status in the instant the session ended (with
-                # self.recording False that status can only be stale). A newer
-                # dictation's transcribing/cleaning status is left alone.
-                self.status_manager.set_status(AppStatus.IDLE)
+    def set_retry_candidate(self, path: str) -> None:
+        self.last_recording = path
 
-        queue = ChunkQueue(
-            transcribe_fn=transcribe_audio,
-            on_result=on_result,
-            on_retrying=on_retrying,
-            on_failed=on_failed,
-            on_pending=on_pending,
-            on_drained=on_drained,
-        )
-        queue_ref.append(queue)
-        # Registry for sweep protection: prune queues that no longer hold any
-        # files (drained with no kept failures) rather than capping by count,
-        # so a slow-draining queue can't lose its files to a sweep
-        self._recent_queues = [q for q in self._recent_queues if q.active_paths()]
-        self._recent_queues.append(queue)
-        return queue
+    def show_warning(self, message: str, duration_ms: int) -> None:
+        self.ui_feedback.show_warning(message, duration_ms)
 
-    def _push_session_note_locked(self) -> None:
-        """Recompute and push the visible note (alert while unexpired, else
-        the state line). Caller must hold _note_lock."""
-        if self._note_alert and time.monotonic() < self._note_alert_until:
-            note = self._note_alert
-        else:
-            self._note_alert = ''
-            note = self._note_state
-        self.ui_feedback.set_recording_note(note)
+    def show_failure(self, short: str, overlay: str) -> None:
+        # Status first, retry overlay second (see _report_failure)
+        self.status_manager.set_status(AppStatus.ERROR, short)
+        self.ui_feedback.show_error_with_retry(overlay)
 
-    def _set_session_state(self, note: str, decay_s: float = 0.0,
-                           clear_alert: bool = False) -> None:
-        """Set the routine session-state line. decay_s clears it back to ''
-        after that long unless superseded. clear_alert also dismisses an
-        active alert — used for fresh user actions (a caps-press flush must
-        always be acknowledged, even mid-alert)."""
-        with self._note_lock:
-            self._note_state_seq += 1
-            seq = self._note_state_seq
-            self._note_state = note
-            if clear_alert:
-                self._note_alert = ''
-            self._push_session_note_locked()
-        if decay_s and note:
-            def decay() -> None:
-                with self._note_lock:
-                    if seq == self._note_state_seq:
-                        self._note_state = ''
-                        self._push_session_note_locked()
-            timer = threading.Timer(decay_s, decay)
-            timer.daemon = True
-            timer.start()
-
-    def _set_session_alert(self, note: str, duration_s: float) -> None:
-        """Show a transient alert over the state line; it expires back to
-        whatever the state line says then."""
-        with self._note_lock:
-            self._note_alert = note
-            self._note_alert_until = time.monotonic() + duration_s
-            self._push_session_note_locked()
-
-        def expire() -> None:
-            # Re-evaluates under the lock: a newer/extended alert keeps
-            # showing, an expired one falls back to the current state
-            with self._note_lock:
-                self._push_session_note_locked()
-        timer = threading.Timer(duration_s + 0.1, expire)
-        timer.daemon = True
-        timer.start()
-
-    def _reset_session_notes(self) -> None:
-        """Clear both note layers and invalidate outstanding decay timers, so
-        a previous session's timers can't touch a later session's notes."""
-        with self._note_lock:
-            self._note_state_seq += 1
-            self._note_state = ''
-            self._note_alert = ''
-            self._note_alert_until = 0.0
-            self.ui_feedback.set_recording_note('')
+    def clear_post_session_status(self) -> None:
+        # Clear our own post-session PROCESSING state — including the case
+        # where the recording watchdog reasserted a stale "Recording" status
+        # in the instant the session ended (with self.recording False that
+        # status can only be stale). A newer dictation's transcribing/
+        # cleaning status is left alone.
+        if (self.status_manager.current_status == AppStatus.PROCESSING or
+                self.status_manager.current_status in RECORDING_STATUSES):
+            self.status_manager.set_status(AppStatus.IDLE)
 
     # Add this method to check recorder status periodically
     def _check_recorder_status(self, token: int) -> None:
@@ -1157,11 +985,11 @@ class VoiceTypingApp:
             self.logger.info("Canceling processing...")
             if self.processing_thread and self.processing_thread.is_alive():
                 self.cancel_flag.set()
-            elif self._chunk_queue is not None:
+            elif self._session is not None:
                 # Only when no dictation is processing is the visible activity
                 # the session queue's post-end drain; cancelling the dictation
                 # must not silently discard delivered-in-order session chunks
-                self._chunk_queue.cancel()
+                self._session.cancel()
             # The processing thread exits silently once it notices the flag;
             # reset the UI here so it can't be left stuck on a pulsing status
             self.status_manager.set_status(AppStatus.IDLE)

@@ -38,6 +38,11 @@ it doesn't belong here.
 | `test_hotkey.py` | One physical Caps Lock press is exactly one toggle: auto-repeat, mashing, Ctrl chords, injected keystrokes, lost key-ups. |
 | `test_chunk_queue.py` | Conversation-session chunks deliver strictly in order, retry exactly once, keep failed files, and never fire after cancel. |
 | `test_error_messages.py` | Provider exceptions classify into the right user-facing reason (quota vs. bad key vs. offline), and the raw text never leaks beyond the fallback. |
+| `test_session.py` | Meeting/Phone sessions: preamble once, chunk headers, notes vs. overlays vs. log depending on whether the session is live, end-of-session failure summary, never painting over a dictation in progress. |
+| `test_fileutil.py` | Settings and history writes are atomic and recover from `.bak` after a torn write. |
+| `test_audio_markers.py` | A recording file alone says dictation / meeting / phone, surviving snapshots and restarts. |
+| `test_custom_stt.py` | Pre-1.0 custom STT base URLs keep working (`/v1` appended), no OpenAI key needed. |
+| `test_tray_menu.py` | Tray menu items are accepted by pystray at construction (one bad item kills the whole icon). |
 
 ## What is deliberately *not* automated
 

@@ -36,7 +36,9 @@ Only one app instance can run (named mutex in `modules/single_instance.py`). The
 
 ## Architecture
 
-`voice_typing.pyw` owns the `VoiceTypingApp` orchestration: hotkey listener, recording lifecycle, the conversation-session machinery (`_flush_chunk` / `_end_session` / `_make_chunk_queue`), a 100ms Tk-thread watchdog (`_check_recorder_status`), and the processing pipeline (analyze → transcribe → optional LLM clean → paste). Everything else is a module with one job:
+`voice_typing.pyw` owns the `VoiceTypingApp` orchestration: hotkey listener, recording lifecycle, the recorder side of conversation sessions (`_flush_chunk` / `_end_session`: sealing chunks, restarting capture, salvaging the tail), a 100ms Tk-thread watchdog (`_check_recorder_status`), and the processing pipeline (analyze → transcribe → optional LLM clean → paste). Everything else is a module with one job:
+
+- `modules/session.py` — `ConversationSession` (one meeting/phone session: its `ChunkQueue`, preamble, failure summary, delivery callbacks) talks to the app only through the `SessionHost` protocol, which `VoiceTypingApp` implements (`is_current`, `deliver_text`, `show_failure`, …). `SessionNotes` is the indicator's state/alert note machine (app-level, `self._notes`). `build_preamble` is pure settings → text. All three are tested with fakes.
 
 - `modules/hotkey.py` — `CapsLockHotkey`: pure state machine turning raw keyboard-hook messages (auto-repeat, Ctrl+Caps chord, injected keystrokes, lost key-ups) into one `TOGGLE` per physical press. The pynput `win32_event_filter` in `voice_typing.pyw` is a thin adapter over it; put new hotkey rules here with a test, never in the adapter.
 - `modules/recorder.py` — `AudioRecorder`: mic capture thread writing `temp_audio.wav`. Flags consumed by the watchdog: `auto_stopped` (initial silence), `error` (device/stream failure — callers must keep captured audio), `max_duration_reached`. Meeting mode adds `modules/loopback_recorder.py` (WASAPI system-audio capture via `soundcard`), composed into a 2-channel WAV on stop.
