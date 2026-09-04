@@ -26,6 +26,7 @@ from modules.settings import Settings, api_key_configured
 from modules.settings import startup_notes as settings_startup_notes
 from modules.transcribe import transcribe_audio, is_conversation_recording
 from modules.tray import setup_tray_icon
+from modules.tray_pin import promote_tray_icon
 from modules.ui import UIFeedback
 from modules.audio_manager import set_input_device, get_default_device_id, DeviceIdentifier, find_device_by_identifier
 from modules.status_manager import StatusManager, AppStatus, RECORDING_STATUSES
@@ -1001,9 +1002,24 @@ class VoiceTypingApp:
         self.settings.set('last_update_check', time.time())
         self.ui_feedback.root.after(15000, lambda: self.check_for_updates(startup=True))
 
+    def _pin_tray_icon(self, attempt: int = 0) -> None:
+        """Promote the tray icon out of the Windows overflow, once per
+        executable path (so a user who later hides it on purpose isn't
+        overruled at every launch). Explorer registers the icon a moment
+        after it appears, so retry a few times."""
+        exe = sys.executable
+        if self.settings.get('tray_pinned_exe') == exe:
+            return
+        result = promote_tray_icon(exe)
+        if result:
+            self.settings.set('tray_pinned_exe', exe)
+        elif result is False and attempt < 5:
+            self.ui_feedback.root.after(5000, lambda: self._pin_tray_icon(attempt + 1))
+
     def run(self) -> None:
         # Start keyboard listener
         self.listener.start()
+        self.ui_feedback.root.after(4000, self._pin_tray_icon)
         self._schedule_startup_update_check()
 
         # Start the UI feedback's tkinter mainloop in the main thread
