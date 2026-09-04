@@ -43,11 +43,15 @@ it doesn't belong here.
 | `test_audio_markers.py` | A recording file alone says dictation / meeting / phone, surviving snapshots and restarts. |
 | `test_custom_stt.py` | Pre-1.0 custom STT base URLs keep working (`/v1` appended), no OpenAI key needed. |
 | `test_tray_menu.py` | Tray menu items are accepted by pystray at construction (one bad item kills the whole icon). |
+| `test_settings_migrations.py` | Every historical settings.json shape loads into the current schema, idempotently, keeping the user's choices and unknown keys. |
+| `test_realtime_stt.py` | Streaming dictation raises (so batch takes over) after any lost turn or server error, and commits after all buffered audio. |
+| `test_updater.py` | The updater never runs an installer whose checksum doesn't match the release, compares versions numerically, and the helper waits for our PID. |
+| `test_version.py` | `version.txt` and `pyproject.toml` agree. |
 
 ## What is deliberately *not* automated
 
 Real `pynput` suppression and Caps Lock LED state, PortAudio/WASAPI device
 behaviour, clipboard paste across applications, tray/overlay rendering, and the
-install/update flow. Those live in `manual/` and `setup_test/` as interactive
-tools and checklists, and are run by a human on a real Windows machine before
-a release.
+install/update flow. `manual/keyboard_test.py` is an interactive tool for the
+first of those; the rest is the release smoke test in
+`docs/release-checklist.md`, run by a human on a real Windows machine.

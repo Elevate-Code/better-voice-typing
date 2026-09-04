@@ -4,7 +4,11 @@
     {
       "category": "General",
       "date": "2026-09-04",
+      "version": "1.0.0",
       "changes": [
+        "Better Voice Typing 1.0 ships as a real Windows installer (BetterVoiceTyping-Setup-<version>.exe on the GitHub release): per-user install with no admin prompt, Start menu entry, optional start-at-sign-in, and a normal uninstall entry. Installing from source with uv remains supported for developers.",
+        "The app now updates itself: it checks for a new release once a day and mentions it on the indicator, and tray → Check for Updates downloads the installer, verifies its checksum against the release's SHA256SUMS.txt, installs silently and relaunches. The old setup.bat update flow that overwrote files in place is gone.",
+        "In-progress recordings and update downloads now live under %LOCALAPPDATA%\\BetterVoiceTyping instead of the app folder, so stray audio files never accumulate in a source checkout or get wiped by an update.",
         "Failed transcriptions now actually show the 'Click to retry' hint and the suggested fix on the indicator; previously the plain error status repainted over them, so the overlay was clickable but never said so.",
         "Pressing Ctrl+Caps Lock and then releasing Ctrl while Caps Lock is still held no longer starts toggling recording on the key's auto-repeat.",
         "If Windows ever fails to deliver a Caps Lock key-release to the app (remote desktop, virtual machines, a stalled keyboard hook), the hotkey recovers on the next press instead of appearing dead until restart.",

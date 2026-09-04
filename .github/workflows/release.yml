@@ -1,0 +1,61 @@
+name: Release
+
+# Push a tag like v1.0.0 (matching version.txt and pyproject.toml) to build
+# the installer and publish a GitHub Release with it. The in-app updater
+# looks for the BetterVoiceTyping-Setup-<version>.exe and SHA256SUMS.txt assets.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install
+        run: uv sync --frozen
+
+      - name: Resolve and verify version
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $file = (Get-Content version.txt -Raw).Trim()
+          if ($tag -ne $file) { throw "Tag $tag does not match version.txt ($file)" }
+          "version=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Build app (PyInstaller)
+        run: uv run pyinstaller BetterVoiceTyping.spec --noconfirm
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc /DAppVersion=${{ steps.version.outputs.version }} installer\BetterVoiceTyping.iss
+
+      - name: Checksums and notes
+        shell: pwsh
+        run: |
+          $v = "${{ steps.version.outputs.version }}"
+          $exe = "dist\installer\BetterVoiceTyping-Setup-$v.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  BetterVoiceTyping-Setup-$v.exe" | Out-File -FilePath dist\installer\SHA256SUMS.txt -Encoding ascii
+          uv run python scripts/release_notes.py $v | Out-File -FilePath dist\installer\release_notes.md -Encoding utf8
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: v${{ steps.version.outputs.version }}
+          body_path: dist/installer/release_notes.md
+          files: |
+            dist/installer/BetterVoiceTyping-Setup-${{ steps.version.outputs.version }}.exe
+            dist/installer/SHA256SUMS.txt

@@ -1,0 +1,50 @@
+[project]
+name = "better-voice-typing"
+version = "1.0.0"
+description = "Windows speech-to-text tray app: press Caps Lock, talk, and the text lands at your cursor"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { file = "LICENSE" }
+dependencies = [
+    # Core
+    "python-dotenv==1.2.2",      # API keys from Documents\VoiceTyping\.env
+    "pynput==1.7.6",             # Caps Lock hook + Ctrl+V keystroke
+    "sounddevice==0.5.1",        # Microphone capture
+    "soundfile==0.12.1",         # WAV/FLAC I/O
+    "soundcard==0.4.6",          # WASAPI loopback (meeting mode system audio)
+    "websocket-client==1.9.0",   # OpenAI Realtime streaming dictation
+    "numpy==2.0.2",
+    "pyperclip==1.9.0",
+    # Providers
+    "openai==2.20.0",            # STT (OpenAI + OpenAI-compatible servers) and transcript cleaning
+    "httpx==0.28.1",             # OpenAI STT timeouts
+    "requests==2.33.0",          # ElevenLabs Scribe
+    # Tray
+    "pystray==0.19.5",
+    "Pillow==12.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Elevate-Code/better-voice-typing"
+Changelog = "https://github.com/Elevate-Code/better-voice-typing/blob/master/CHANGELOG.json"
+Issues = "https://github.com/Elevate-Code/better-voice-typing/issues"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-timeout==2.4.0",
+    "pyinstaller==6.22.2",
+]
+
+[tool.uv]
+# The app is run from the checkout / frozen with PyInstaller, never installed as a package
+package = false
+
+[tool.pytest.ini_options]
+# Only tests/*.py are collected. tests/manual/ holds interactive tools
+# (see tests/README.md).
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --ignore=tests/manual"
+# Every test here exercises threads or timing; a hang is a failure, not a wait.
+timeout = 20

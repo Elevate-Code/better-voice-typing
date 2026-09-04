@@ -1,6 +1,0 @@
-# Development-only dependencies (tests). Install on top of requirements.txt:
-#   uv pip install -r requirements-dev.txt
-# Run the suite:
-#   .\.venv\Scripts\python.exe -m pytest
-pytest==9.1.1
-pytest-timeout==2.4.0

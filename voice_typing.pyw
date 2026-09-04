@@ -16,8 +16,10 @@ from modules.clean_text import clean_transcription
 from modules.error_messages import (
     CANCELLED, NO_RECORDING, TranscriptionFailure, describe_transcription_error,
 )
+from modules import updater
 from modules.history import TranscriptionHistory
 from modules.hotkey import CapsLockHotkey, HotkeyAction
+from modules.paths import RECORDINGS_DIR
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
 from modules.session import ConversationSession, SessionNotes
 from modules.settings import Settings, api_key_configured
@@ -61,7 +63,11 @@ class VoiceTypingApp:
         ui_size = self.settings.get('ui_indicator_size')
         ui_all_displays = self.settings.get('ui_indicator_all_displays')
         self.ui_feedback = UIFeedback(position=ui_position, size=ui_size, all_displays=ui_all_displays)
+        # In-progress recordings live under %LOCALAPPDATA%, never in the
+        # program folder (which the installer replaces wholesale)
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
         self.recorder = AudioRecorder(
+            filename=str(RECORDINGS_DIR / 'temp_audio.wav'),
             level_callback=self.ui_feedback.update_audio_level,
             silent_start_timeout=silent_start_timeout
         )
@@ -948,9 +954,57 @@ class VoiceTypingApp:
         if self.update_icon_menu:
             self.update_icon_menu()
 
+    def check_for_updates(self, startup: bool = False) -> None:
+        """Tray "Check for Updates", and the once-daily startup check.
+
+        Installed app: newer release → download, verify, hand off to the
+        installer and exit (the startup variant only announces it). Source
+        checkout: open the releases page."""
+        def worker() -> None:
+            try:
+                if not updater.running_as_installed():
+                    if not startup:
+                        updater.open_releases_page()
+                    return
+                release = updater.fetch_latest_release()
+                current = updater.current_version()
+                if release is None or not updater.is_newer(release.version, current):
+                    if not startup:
+                        self.ui_feedback.show_warning(f"✅ Up to date (v{current})", 3000)
+                    return
+                if startup:
+                    self.ui_feedback.show_warning(
+                        f"⬆️ v{release.version} is available — tray → Check for Updates", 6000)
+                    return
+                with self._toggle_lock:
+                    if self.recording:
+                        self.ui_feedback.show_warning("⚠️ Finish recording before updating", 3000)
+                        return
+                self.ui_feedback.show_warning(f"⬇️ Downloading v{release.version}…", 15000)
+                installer = updater.download_installer(release)
+                self.ui_feedback.show_warning("🔄 Installing update — the app will restart", 5000)
+                time.sleep(1.5)  # let the notice paint before the process goes away
+                updater.launch_installer_and_exit(installer)
+            except Exception as e:
+                self.logger.error("Update check failed", exc_info=True)
+                if not startup:
+                    self.ui_feedback.show_warning(f"⚠️ Update failed: {str(e)[:70]}", 6000)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _schedule_startup_update_check(self) -> None:
+        """At most once a day, a little after startup, only for installed builds."""
+        if not updater.running_as_installed():
+            return
+        last = self.settings.get('last_update_check') or 0
+        if time.time() - float(last) < 24 * 3600:
+            return
+        self.settings.set('last_update_check', time.time())
+        self.ui_feedback.root.after(15000, lambda: self.check_for_updates(startup=True))
+
     def run(self) -> None:
         # Start keyboard listener
         self.listener.start()
+        self._schedule_startup_update_check()
 
         # Start the UI feedback's tkinter mainloop in the main thread
         try:

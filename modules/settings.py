@@ -8,20 +8,20 @@ from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
 from modules.fileutil import backup_path, read_json_with_backup, write_json_atomic
+from modules.paths import APP_DIR, INSTALL_DIR, USER_DATA_DIR
 from modules.settings_migrations import SCHEMA_VERSION, migrate
 
 logger = logging.getLogger('voice_typing')
 
 # User data lives outside the app folder so it survives updates (which replace
 # app files wholesale) and git operations on a source checkout.
-SETTINGS_DIR = Path.home() / "Documents" / "VoiceTyping"
+SETTINGS_DIR = USER_DATA_DIR
 SETTINGS_FILE = SETTINGS_DIR / 'settings.json'
 # API keys. Before 1.0 this was a .env in the app folder; see _load_env_files.
 ENV_FILE = SETTINGS_DIR / '.env'
 
-_APP_DIR = Path(__file__).resolve().parent.parent
-_LEGACY_ENV_FILE = _APP_DIR / '.env'
-_ENV_TEMPLATE = _APP_DIR / '.env.example'
+_LEGACY_ENV_FILE = INSTALL_DIR / '.env'
+_ENV_TEMPLATE = APP_DIR / '.env.example'
 _LEGACY_SETTINGS_FILE = Path(__file__).resolve().parent / 'settings.json'
 
 # This module runs before logging is configured (the app sets up logging

@@ -157,29 +157,34 @@ If your server requires authentication, set the `CUSTOM_STT_API_KEY` environment
 CUSTOM_STT_API_KEY="your-api-key-here"
 ```
 
-## Setup/Installation - For Users
+## Installation
 
-### Quick Start (Windows)
+### Installer (recommended)
 
-* Requires Python 3.10 - 3.12 (check with `python --version`) - get from [python.org](https://python.org)
-* Requires `uv` CLI tool (check with `uv --version`) - get from [uv installation guide](https://docs.astral.sh/uv/getting-started/#installation)
+1. Download `BetterVoiceTyping-Setup-<version>.exe` from the [latest release](https://github.com/Elevate-Code/better-voice-typing/releases/latest).
 
-1. Download this project by clicking the green "Code" button at top of page → "Download ZIP" or clone the repo
-2. Extract the ZIP file to a location of your choice
-3. Run `setup.bat` from Command Prompt or PowerShell:
-   - Open Command Prompt or PowerShell (run `cmd` or `powershell` in the search bar)
-   - Navigate to the folder: `cd "path\to\extracted\better-voice-typing"`
-   - Run: `setup.bat` (Command Prompt) or `.\setup.bat` (PowerShell)
-   - This will create a virtual environment, install packages, and set up default configuration
-   - If you encounter any installation issues, please [report them](https://github.com/Elevate-Code/better-voice-typing/issues)
-4. Launch the application by double-clicking the `run_voice_typing.bat` file in the application folder. A microphone icon appears in the system tray.
-5. Right-click the tray icon → **Open API Keys (.env)**, add at least one speech-to-text API key (not needed only if you run a local Custom STT server — see below), save, then tray icon → **Restart**:
+   > **Windows will warn you the first time you run the installer.** It isn't code-signed: signing certificates cost money and require identity verification, and this is a free hobby project. You'll see "Windows protected your PC". Click **More info**, then **Run anyway**. Updates from inside the app won't show this again. Prefer to see the code first? Install from source below; it runs the same code without the one-click installer.
+
+2. Run the installer. It installs for your user only (no admin prompt) into `%LOCALAPPDATA%\Programs\Better Voice Typing`, adds a Start menu entry, and by default starts the app when you sign in to Windows.
+3. A microphone icon appears in the system tray. Right-click it → **Open API Keys (.env)**, add at least one speech-to-text API key (not needed only if you run a local Custom STT server — see below), save, then tray icon → **Restart**:
    - ElevenLabs API key ([get one here](https://elevenlabs.io/app/settings/api-keys)) — recommended: best dictation accuracy, and required for Meeting/Phone modes
    - and/or OpenAI API key ([get one here](https://platform.openai.com/api-keys)) — also enables Streaming Dictation and transcript cleaning
 
-   Your keys and settings live in `Documents\VoiceTyping\`, so they survive app updates.
-6. 💡 Ensure the app's tray icon is visible by right-clicking the taskbar → "Taskbar settings" → "Select which icons appear on the taskbar" → Toggle on for Voice Typing Assistant
-7. Right-click `run_voice_typing.bat` → Send to → Desktop to create a shortcut
+   Your keys, settings and history live in `Documents\VoiceTyping\`, so they survive updates and reinstalls.
+4. 💡 Make the tray icon always visible: right-click the taskbar → "Taskbar settings" → "Other system tray icons" → toggle on Better Voice Typing.
+
+### Updating
+
+The app checks for a new release once a day and mentions it on the indicator. Tray icon → **Check for Updates** downloads the new installer, verifies its checksum against the release's `SHA256SUMS.txt`, installs it silently and relaunches the app. Uninstall via Windows Settings → Apps; your data in `Documents\VoiceTyping` is left in place.
+
+### From source (developers, or if you'd rather not run an installer)
+
+Requires [`uv`](https://docs.astral.sh/uv/getting-started/#installation); it fetches a suitable Python (3.10–3.12) by itself.
+
+1. Clone the repo (or download and extract the ZIP)
+2. Run `setup.bat` (creates the environment with `uv sync`), or run `uv sync` yourself
+3. Launch with `run_voice_typing.bat`; right-click it → Send to → Desktop for a shortcut, or put a shortcut in `shell:startup` to launch at sign-in
+4. Add API keys as in step 3 above. From source, **Check for Updates** opens the releases page; update with `git pull` and `uv sync`.
 
 **(Optional) Fine-tune transcript cleaning**
 
@@ -191,46 +196,15 @@ If you still want to use the post-processing feature:
    - Claude example: `"llm_base_url": "https://api.anthropic.com/v1/"`, `"llm_model": "claude-3-5-haiku-latest"`, and `LLM_API_KEY=<your Anthropic key>` in `.env`.
 3. Save the file and restart the application.
 
-### Auto-start with Windows
-To make the app start automatically when Windows boots:
-1. Press `Win + R` on your keyboard
-2. Type `shell:startup` and press Enter
-3. Create a shortcut to `run_voice_typing.bat` in this folder:
-   - Right-click `run_voice_typing.bat` → "Copy"
-   - Navigate to the startup folder
-   - Right-click in an empty area → "Paste shortcut" (might be under more options)
+## Development
 
-### Updating the App
-To update to the latest version:
-1. Open Command Prompt or PowerShell
-2. Navigate to the folder: `cd "path\to\better-voice-typing"`
-3. Run: `setup.bat` (Command Prompt) or `.\setup.bat` (PowerShell)
-4. Choose 'Y' when asked to check for updates
-5. The tool will automatically:
-   - Download the latest version
-   - Preserve your settings and API keys
-   - Update all dependencies
-6. Restart the app if it was running
-
-## Setup/Installation - For Developers
-
-1. Clone the repo
-2. Ensure you have `uv` installed (see [uv installation guide](https://docs.astral.sh/uv/getting-started/#installation))
-3. Create a virtual environment with `uv venv --python ">=3.10,<3.13"`
-4. Activate with `.venv\Scripts\activate`
-5. Install dependencies with `uv pip install -r requirements.txt`
-6. Run the app once; it creates `Documents\VoiceTyping\.env` from `.env.example` (an app-folder `.env` from older versions is moved there automatically)
-7. Set up your API keys in that `.env` (at least one STT key):
-   - ElevenLabs API key from the [ElevenLabs dashboard](https://elevenlabs.io/app/settings/api-keys) (recommended default; powers Meeting/Phone modes)
-   - and/or OpenAI API key from [OpenAI's API Keys page](https://platform.openai.com/api-keys) (also powers Streaming Dictation and transcript cleaning)
-8. Run the app from the command line:
-   ```
-   .\.venv\Scripts\python.exe .\voice_typing.pyw
-   ```
-9. For debugging: Add the `--debug` flag when executing:
+1. Clone the repo and run `uv sync` (creates `.venv` with the locked dependencies, dev tools included)
+2. Run the app once; it creates `Documents\VoiceTyping\.env` from `.env.example` (an app-folder `.env` from older versions is moved there automatically) — add your keys there
+3. Run the app from the command line (`--debug` keeps the console and verbose logs):
    ```
    .\.venv\Scripts\python.exe .\voice_typing.pyw --debug
    ```
+4. Tests: `uv run pytest` (see `tests/README.md` for what belongs there). Build the installer locally with `uv run pyinstaller BetterVoiceTyping.spec --noconfirm` then `iscc /DAppVersion=<version> installer\BetterVoiceTyping.iss` (Inno Setup 6). Releases are built by GitHub Actions on a `v*` tag; see `docs/release-checklist.md`.
 
 ## TODO/Roadmap
 

@@ -9,26 +9,29 @@ Windows-only speech-to-text tray app (Python 3.10–3.12, tkinter + pynput). Cap
 ## Commands
 
 ```powershell
-# Environment (uv-managed venv)
-uv venv --python ">=3.10,<3.13"
-uv pip install -r requirements.txt        # after adding a locked pin to requirements.txt
+# Environment: pyproject.toml + uv.lock are the source of truth (dev group included by default)
+uv sync                                    # after editing pyproject.toml: uv lock, then uv sync
 
 # Run (console, with logs visible)
 .\.venv\Scripts\python.exe .\voice_typing.pyw --debug
-# Run detached (what users use)
+# Run detached (source users)
 .\run_voice_typing.bat
 
 # Quick syntax check of edited files
 .\.venv\Scripts\python.exe -m py_compile voice_typing.pyw modules\*.py services\*.py
 
-# Unit tests (pytest; see tests/README.md for what belongs there)
-uv pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m pytest
+# Unit tests (pytest config lives in pyproject.toml; see tests/README.md for what belongs there)
+uv run pytest
 
-# Manual tools: real-keyboard hotkey check, setup/update-flow harness
+# Frozen build + installer (what users get; CI does this on a v* tag)
+uv run pyinstaller BetterVoiceTyping.spec --noconfirm        # -> dist\BetterVoiceTyping\
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DAppVersion=1.0.0 installer\BetterVoiceTyping.iss   # -> dist\installer\
+
+# Manual tool: real-keyboard hotkey check
 .\.venv\Scripts\python.exe tests\manual\keyboard_test.py
-cd tests\setup_test; .\test_setup_simple.ps1
 ```
+
+Only one app instance can run (named mutex in `modules/single_instance.py`), so a frozen build and the dev instance can't run at once. Installing the built setup with `/VERYSILENT /CURRENTUSER /MERGETASKS=!startup,!desktopicon` and uninstalling with `unins000.exe /VERYSILENT` leaves the machine as it was (user data is never touched).
 
 Tests cover only brittle, load-bearing contracts (hotkey message sequences, chunk ordering/retry/cancel, error classification) — no coverage target. Hardware, network, Tk, and the global keyboard hook are never touched; if a change can't be tested without patching internals, add an injectable seam (clock, delay, callable) instead.
 
@@ -49,11 +52,12 @@ Only one app instance can run (named mutex in `modules/single_instance.py`). The
 - `modules/ui.py` + `modules/status_manager.py` + `modules/tray.py` — recording indicator overlay(s), status state machine, pystray menu. tkinter is not thread-safe: all UI work must be marshalled through `UIFeedback` (queue → Tk main loop). Mid-recording warnings must use `UIFeedback.set_recording_note`, not `show_warning` — the pulse/elapsed-time ticker overwrites the warning overlay. Always-on-top is re-asserted (toggle off/on, `_assert_topmost`) on every show and every pulse tick because Tk skips the Win32 call when it thinks the flag is unchanged while Windows may have demoted the window. When reporting a retryable error, call `status_manager.set_status(ERROR, …)` *before* `show_error_with_retry(…)`: both repaint the label in UI-queue order and only the overlay carries the hint and the "click to retry" line.
 - `modules/paste.py` — the one delivery strategy: clipboard + Ctrl+V (pynput) + delayed clipboard restore, serialized by a lock. The pre-1.0 output-provider plugin system is gone by decision; don't reintroduce a plugin folder.
 - `services/openai_realtime_stt.py` — streaming dictation (beta) over an OpenAI Realtime websocket while recording; any failure falls back to the batch upload (the WAV is always written in parallel).
-- `check_update.py` — self-updater: downloads the latest GitHub release zipball and replaces app files, preserving `.env` and settings.
+- `modules/paths.py` — every path comes from here: `APP_DIR` (bundled resources; `sys._MEIPASS` when frozen), `INSTALL_DIR`, `USER_DATA_DIR` (`Documents\VoiceTyping`: settings, `.env`, history, logs), `LOCAL_DATA_DIR` (`%LOCALAPPDATA%\BetterVoiceTyping`: in-progress recordings, update downloads), `app_version()` from the bundled `version.txt`.
+- `modules/updater.py` — installer-based self-update for frozen builds only: GitHub latest release → `BetterVoiceTyping-Setup-<v>.exe` asset verified against `SHA256SUMS.txt` → detached helper script waits for our PID, runs setup `/VERYSILENT`, relaunches. Source checkouts get the releases page. Never overwrite the program folder from inside the app.
 
 Concurrency invariants in `voice_typing.pyw`: recording start/stop/flush are serialized by `_toggle_lock`; `_recording_generation` stamps snapshot filenames (`temp_audio.wav.N.wav`) so a new recording can't clobber one mid-transcription; `_watchdog_token` ties the poll chain to the recording that started it. The snapshot sweeper must never delete files still referenced by a live `ChunkQueue` (`_recent_queues` registry).
 
-User data (settings.json, logs, history.json) lives in `Documents\VoiceTyping\`, never in the repo — app updates replace repo files wholesale.
+User data (settings.json, `.env`, logs, history.json) lives in `Documents\VoiceTyping\` and in-progress recordings in `%LOCALAPPDATA%\BetterVoiceTyping\recordings\`, never in the program folder — the installer replaces it wholesale.
 
 pynput gotcha: `listener.suppress_event()` raises an exception by design — code after it never runs (documented where used in `voice_typing.pyw`).
 
@@ -69,7 +73,9 @@ pynput gotcha: `listener.suppress_event()` raises an exception by design — cod
 
 ## Release process
 
-1. Bump `version.txt` (bare number, e.g. `0.8.0`) and add/mark the `CHANGELOG.json` entry with that version.
-2. Commit and push all changes to `master`.
-3. Create and push a git tag: `git tag vX.Y.Z && git push origin vX.Y.Z` (tag carries the `v` prefix; `version.txt` does not — `check_update.py` normalizes when comparing).
-4. On GitHub Releases, draft a release from the tag with notes from the changelog, and publish. No build artifacts — users install from source, and the in-app updater downloads the release zipball.
+1. Bump `version.txt` AND `pyproject.toml` (bare number, e.g. `1.0.0`; `tests/test_version.py` checks they match) and give the `CHANGELOG.json` entry that `version`.
+2. Commit and push to `master`; CI (`.github/workflows/ci.yml`) runs tests and a PyInstaller build.
+3. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`. The Release workflow refuses a tag that doesn't match `version.txt`, then builds the installer, writes `SHA256SUMS.txt`, and publishes the GitHub Release with notes from `scripts/release_notes.py`.
+4. Smoke-test the installer per `docs/release-checklist.md`. Installed apps pick the release up via the daily check / tray "Check for Updates".
+
+The installer is unsigned (documented in README: users click "More info → Run anyway"). Revisit Azure Artifact Signing (~$10/month, individual identity validation) once download counts justify it.

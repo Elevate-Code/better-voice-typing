@@ -2,14 +2,14 @@ import logging
 import threading
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 from typing import List, Deque
 
 from modules.fileutil import read_json_with_backup, write_json_atomic
+from modules.paths import USER_DATA_DIR
 
 logger = logging.getLogger('voice_typing')
 
-HISTORY_FILE = Path.home() / "Documents" / "VoiceTyping" / "history.json"
+HISTORY_FILE = USER_DATA_DIR / "history.json"
 MAX_PERSISTED_ITEMS = 50
 
 class TranscriptionHistory:

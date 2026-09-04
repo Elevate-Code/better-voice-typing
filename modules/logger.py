@@ -11,7 +11,8 @@ if TYPE_CHECKING:
 def get_log_dir() -> Path:
     """Logs directory in the user's documents folder.
     Ex. "C:\\Users\\{name}\\Documents\\VoiceTyping\\logs" """
-    return Path.home() / "Documents" / "VoiceTyping" / "logs"
+    from modules.paths import USER_DATA_DIR
+    return USER_DATA_DIR / "logs"
 
 
 def setup_logging(settings: "Settings") -> logging.Logger:

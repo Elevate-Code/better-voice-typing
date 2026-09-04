@@ -13,6 +13,7 @@ from PIL import Image
 from modules.audio_manager import get_input_devices, get_default_device_id, create_device_identifier, names_match
 from modules import transcribe
 from modules.logger import get_log_dir
+from modules.paths import APP_DIR, app_version
 from modules.settings import ENV_FILE
 
 # Windows constants for TaskbarCreated message
@@ -23,10 +24,8 @@ ICON_RESTART_DELAY = 2  # Wait 2 seconds before restarting icon after failure
 logger = logging.getLogger('voice_typing')
 
 def create_tray_icon(icon_path: str) -> Image.Image:
-    """Create tray icon from file path"""
-    current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    icon_path = os.path.join(current_dir, icon_path)
-    return Image.open(icon_path)
+    """Load a bundled tray icon (path relative to the app resources)."""
+    return Image.open(APP_DIR / icon_path)
 
 UI_POSITIONS = [
     ('Top Left', 'top-left'), ('Top Center', 'top-center'), ('Top Right', 'top-right'),
@@ -413,6 +412,8 @@ class TrayIconManager:
                     )
                 )
             ),
+            pystray.MenuItem(f'Check for Updates (v{app_version()})',
+                             lambda icon, item: app.check_for_updates()),
             pystray.MenuItem('Restart', lambda icon, item: app.restart_app()),
             pystray.MenuItem('Exit', on_exit)
         )

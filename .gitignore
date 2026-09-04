@@ -9,8 +9,6 @@ modules/settings.json
 temp/
 temp_audio.*
 temp_update/
-tests/setup_test/fresh/
-tests/setup_test/update/
 sandbox/
 
 ########################################################################
@@ -78,11 +76,8 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+# PyInstaller (the committed BetterVoiceTyping.spec is the build definition)
 *.manifest
-*.spec
 
 # Installer logs
 pip-log.txt
