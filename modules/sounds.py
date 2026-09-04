@@ -19,15 +19,18 @@ _cache: Dict[str, bytes] = {}
 _lock = threading.Lock()
 
 
-def _tone(notes: List[Tuple[float, float]], gap_s: float = 0.02, volume: float = 0.3) -> bytes:
+def _tone(notes: List[Tuple[float, float]], gap_s: float = 0.02, volume: float = 0.4,
+          lead_in_s: float = 0.08) -> bytes:
     """WAV bytes for a sequence of (frequency_hz, duration_s) sine notes with
-    a gentle attack/release envelope so they don't click."""
+    a gentle attack/release envelope so they don't click. A short silent
+    lead-in absorbs output-device start-up latency (virtual mixers and
+    Bluetooth devices can swallow the first ~100 ms of a clip)."""
     import numpy as np
-    parts = []
+    parts = [np.zeros(int(_RATE * lead_in_s))]
     for freq, dur in notes:
         n = int(_RATE * dur)
         t = np.arange(n) / _RATE
-        env = np.minimum(1.0, np.minimum(t / 0.012, (dur - t) / 0.05))
+        env = np.minimum(1.0, np.minimum(t / 0.012, (dur - t) / 0.06))
         # A touch of the second harmonic makes it sound less like a beep
         wave_data = np.sin(2 * np.pi * freq * t) + 0.25 * np.sin(2 * np.pi * freq * 2 * t)
         parts.append(wave_data * env * volume)
@@ -49,9 +52,9 @@ def _cue(name: str) -> Optional[bytes]:
         if data is None:
             try:
                 if name == 'start':
-                    data = _tone([(660.0, 0.07), (880.0, 0.10)])
+                    data = _tone([(660.0, 0.14), (880.0, 0.20)])
                 else:
-                    data = _tone([(880.0, 0.07), (587.0, 0.12)])
+                    data = _tone([(880.0, 0.14), (587.0, 0.22)])
             except Exception:
                 logger.warning("Could not synthesize sound cue", exc_info=True)
                 return None
