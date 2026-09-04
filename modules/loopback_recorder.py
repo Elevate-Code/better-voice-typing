@@ -37,7 +37,12 @@ class LoopbackRecorder(threading.Thread):
         self.samplerate = samplerate
         self.blocksize = samplerate // 10  # 100ms blocks
         self._stop_event = threading.Event()
+        # Guards _blocks and _sealed: a capture thread stuck in the driver
+        # can outlive stop(), and must then neither grow the buffer forever
+        # nor append while audio() is concatenating it
+        self._lock = threading.Lock()
         self._blocks: list[np.ndarray] = []
+        self._sealed = False
         self.first_block_time: Optional[float] = None
         self.error: Optional[Exception] = None
 
@@ -53,19 +58,29 @@ class LoopbackRecorder(threading.Thread):
                     data = rec.record(numframes=self.blocksize)
                     if self.first_block_time is None:
                         self.first_block_time = time.time()
-                    self._blocks.append(data.mean(axis=1).astype(np.float32))
+                    block = data.mean(axis=1).astype(np.float32)
+                    with self._lock:
+                        if self._sealed:
+                            break
+                        self._blocks.append(block)
         except Exception as e:
             self.error = e
             logger.error(f"Loopback capture failed: {e}")
 
     def stop(self) -> None:
+        """Stop capture and seal the buffer. If the thread is stuck in the
+        audio driver it may keep running, but it can no longer add audio."""
         self._stop_event.set()
         self.join(timeout=3.0)
+        with self._lock:
+            self._sealed = True
         if self.is_alive():
-            logger.warning("Loopback recorder thread did not stop cleanly")
+            logger.warning("Loopback recorder thread did not stop cleanly; buffer sealed")
 
     def audio(self) -> np.ndarray:
         """Captured mono audio as float32; empty array if capture failed."""
-        if not self._blocks:
+        with self._lock:
+            blocks = list(self._blocks)
+        if not blocks:
             return np.zeros(0, dtype=np.float32)
-        return np.concatenate(self._blocks)
+        return np.concatenate(blocks)

@@ -30,6 +30,10 @@ REALTIME_SAMPLE_RATE = 24000
 # How long finish() waits for the tail of the audio to come back transcribed.
 FINISH_TIMEOUT_S = 5.0
 
+# Send-queue sentinel: the final commit travels through the same queue as
+# the audio so it can never overtake chunks still waiting to be sent.
+_COMMIT = object()
+
 
 class StreamingSessionError(Exception):
     """The streaming session failed; caller should fall back to batch."""
@@ -66,7 +70,12 @@ class RealtimeDictationSession:
         self.turn_detection = turn_detection or self.DEFAULT_TURN_DETECTION
 
         self._ws = None
-        self._send_queue: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=600)
+        self._send_queue: "queue.Queue[object]" = queue.Queue(maxsize=600)
+        self._commit_sent = threading.Event()
+        # Any per-turn transcription failure or server error after setup:
+        # the streamed text is then incomplete, and the caller must use the
+        # batch upload instead (the WAV is always written in parallel)
+        self._failed = False
         self._segments: list[str] = []
         self._segments_lock = threading.Lock()
         # Every committed speech turn produces a conversation item, and every
@@ -160,12 +169,14 @@ class RealtimeDictationSession:
         for _ in range(8):  # 800ms > silence_duration_ms (400ms)
             self.feed(silence)
 
-        # Wait for the sender to drain what the audio callback enqueued
-        deadline = time.time() + 2.0
-        while not self._send_queue.empty() and time.time() < deadline:
-            time.sleep(0.02)
-
-        self._send_json({"type": "input_audio_buffer.commit"})
+        # The commit goes through the send queue behind the buffered audio,
+        # so it cannot overtake chunks the sender hasn't pushed yet
+        try:
+            self._send_queue.put(_COMMIT, timeout=2.0)
+        except queue.Full:
+            self.error = "send queue stalled before commit"
+            self._dead.set()
+        self._commit_sent.wait(timeout=2.0)
 
         # Wait until every committed speech turn has its final transcription.
         # The tail commit needs a moment to register as a new item, so also
@@ -181,12 +192,19 @@ class RealtimeDictationSession:
                 break
             time.sleep(0.05)
 
+        # Decide before abort() (which itself marks the session dead): a
+        # session that died or dropped a turn has an incomplete transcript,
+        # and partial text must never be pasted as if it were the whole thing
+        failed = self._failed or self._dead.is_set()
         self.abort()
 
+        if failed:
+            raise StreamingSessionError(
+                self.error or "streaming session incomplete; using batch upload")
         with self._segments_lock:
             text = " ".join(s.strip() for s in self._segments if s.strip()).strip()
         if not text:
-            raise StreamingSessionError(self.error or "no transcript received")
+            raise StreamingSessionError("no transcript received")
         return text
 
     def abort(self) -> None:
@@ -219,6 +237,10 @@ class RealtimeDictationSession:
                 continue
             if chunk is None:
                 break
+            if chunk is _COMMIT:
+                self._send_json({"type": "input_audio_buffer.commit"})
+                self._commit_sent.set()
+                continue
             self._send_json({
                 "type": "input_audio_buffer.append",
                 "audio": base64.b64encode(chunk).decode("ascii"),
@@ -271,10 +293,14 @@ class RealtimeDictationSession:
                 with self._segments_lock:
                     self._segments.append(transcript)
         elif etype == "conversation.item.input_audio_transcription.failed":
-            # Count it so finish() doesn't wait forever on a failed turn
+            # Count it so finish() doesn't wait forever on this turn, and
+            # mark the session incomplete: its words are gone from the
+            # stream, so finish() must hand over to the batch upload
             self._items_finished += 1
-            logger.warning(f"Realtime transcription failed for one turn: "
-                           f"{event.get('error', {}).get('message', '')}")
+            self._failed = True
+            self.error = ("turn transcription failed: "
+                          f"{(event.get('error') or {}).get('message', '')}")
+            logger.warning(f"Realtime {self.error}; will fall back to batch")
         elif etype == "error":
             err = event.get("error", {}) or {}
             code = err.get("code", "")
@@ -282,7 +308,9 @@ class RealtimeDictationSession:
             if code == "input_audio_buffer_commit_empty":
                 return
             self.error = f"{code or 'error'}: {err.get('message', '')}"
-            logger.warning(f"Realtime session error event: {self.error}")
-            # Setup errors are fatal; transcription errors for one turn are not
+            logger.warning(f"Realtime session error event: {self.error}; will fall back to batch")
+            # Setup errors kill the session outright; a mid-session error
+            # lets the stream continue but the result is no longer trusted
+            self._failed = True
             if not self._session_ready.is_set():
                 self._dead.set()

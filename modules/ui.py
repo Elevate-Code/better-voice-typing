@@ -213,8 +213,22 @@ class UIFeedback:
         """Show all indicator windows and ensure they stay on top."""
         for indicator in self.indicators:
             indicator.deiconify()
+            self._assert_topmost(indicator)
+
+    @staticmethod
+    def _assert_topmost(indicator: tk.Toplevel) -> None:
+        """Force the window back into the topmost band.
+
+        Tk skips the Win32 call when it believes '-topmost' is already set,
+        but Windows can quietly demote the window (another topmost window
+        raised over it, a fullscreen app, a UAC prompt, display changes).
+        Toggling off and on makes Tk re-issue SetWindowPos(HWND_TOPMOST)."""
+        try:
+            indicator.attributes('-topmost', False)
             indicator.attributes('-topmost', True)
             indicator.lift()
+        except tk.TclError:
+            pass
 
     def _position_single_window(self, indicator: tk.Toplevel, monitor_geometry: Optional[MonitorGeometry]) -> None:
         """Positions a single indicator window on the given monitor."""
@@ -333,6 +347,9 @@ class UIFeedback:
                 indicator.configure(bg=color)
                 frame.configure(bg=color)
                 label.configure(bg=color)
+                # While anything is in progress, keep re-asserting topmost:
+                # the indicator sporadically ended up behind other windows
+                self._assert_topmost(indicator)
         except tk.TclError:
             return
         self._pulse_after_id = self.root.after(500, self._pulse)  # Pulse every 500ms

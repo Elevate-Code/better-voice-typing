@@ -3,7 +3,7 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -24,6 +24,11 @@ _LEGACY_ENV_FILE = _APP_DIR / '.env'
 _ENV_TEMPLATE = _APP_DIR / '.env.example'
 _LEGACY_SETTINGS_FILE = Path(__file__).resolve().parent / 'settings.json'
 
+# This module runs before logging is configured (the app sets up logging
+# from Settings), so anything worth telling the user about startup is
+# collected here and logged by the app once the logger exists.
+startup_notes: List[str] = []
+
 
 def _load_env_files() -> None:
     """Load API keys as early as possible: settings migrations and the
@@ -40,12 +45,12 @@ def _load_env_files() -> None:
             SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
             if _LEGACY_ENV_FILE.exists():
                 shutil.move(str(_LEGACY_ENV_FILE), str(ENV_FILE))
-                logger.info(f"Moved API keys file to {ENV_FILE}")
+                startup_notes.append(f"Moved API keys file from the app folder to {ENV_FILE}")
             elif _ENV_TEMPLATE.exists():
                 shutil.copyfile(_ENV_TEMPLATE, ENV_FILE)
-                logger.info(f"Created API keys file from template at {ENV_FILE}")
-    except OSError:
-        logger.warning("Could not set up the API keys file", exc_info=True)
+                startup_notes.append(f"Created API keys file from template at {ENV_FILE}")
+    except OSError as e:
+        startup_notes.append(f"Could not set up the API keys file: {e}")
     load_dotenv(ENV_FILE)
     load_dotenv(_LEGACY_ENV_FILE)
 
@@ -198,8 +203,7 @@ class Settings:
                 logger.error("Settings unreadable and no usable backup; using defaults")
                 return self.default_settings.copy(), False
             migrated, notes = migrate(stored)
-            for note in notes:
-                logger.info(f"Settings migration: {note}")
+            startup_notes.extend(f"Settings migration: {note}" for note in notes)
             return {**self.default_settings, **migrated}, bool(notes)
         except Exception as e:
             logger.error(f"Error loading settings: {e}")

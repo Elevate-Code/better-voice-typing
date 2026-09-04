@@ -21,6 +21,7 @@ from modules.hotkey import CapsLockHotkey, HotkeyAction
 from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
 from modules.session import ConversationSession, SessionNotes
 from modules.settings import Settings, api_key_configured
+from modules.settings import startup_notes as settings_startup_notes
 from modules.transcribe import transcribe_audio, is_conversation_recording
 from modules.tray import setup_tray_icon
 from modules.ui import UIFeedback
@@ -38,6 +39,9 @@ class VoiceTypingApp:
         # Setup logging
         self.logger = setup_logging(self.settings)
         self.logger.info("Starting Voice Typing application")
+        # Settings loads before logging exists; replay what it did on the way in
+        for note in settings_startup_notes:
+            self.logger.info(note)
 
         # Windows specific tweaks (DPI awareness & hiding console)
         if os.name == 'nt':
