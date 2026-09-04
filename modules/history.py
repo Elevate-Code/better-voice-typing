@@ -1,10 +1,11 @@
-import json
 import logging
 import threading
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import List, Deque
+
+from modules.fileutil import read_json_with_backup, write_json_atomic
 
 logger = logging.getLogger('voice_typing')
 
@@ -23,22 +24,17 @@ class TranscriptionHistory:
 
     def _load(self) -> None:
         try:
-            self._entries = json.loads(HISTORY_FILE.read_text(encoding='utf-8'))[-MAX_PERSISTED_ITEMS:]
+            entries = read_json_with_backup(HISTORY_FILE, default=[])
+            self._entries = list(entries)[-MAX_PERSISTED_ITEMS:]
             for entry in self._entries[-self.history.maxlen:]:
                 self.history.append(entry['text'])
-        except FileNotFoundError:
-            self._entries = []
         except Exception as e:
             logger.warning(f"Could not load transcription history: {e}")
             self._entries = []
 
     def _save(self) -> None:
         try:
-            HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-            HISTORY_FILE.write_text(
-                json.dumps(self._entries, indent=2, ensure_ascii=False),
-                encoding='utf-8'
-            )
+            write_json_atomic(HISTORY_FILE, self._entries, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.warning(f"Could not save transcription history: {e}")
 

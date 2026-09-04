@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import shutil
@@ -7,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
+
+from modules.fileutil import backup_path, read_json_with_backup, write_json_atomic
 
 logger = logging.getLogger('voice_typing')
 
@@ -300,13 +301,16 @@ class Settings:
 
     def load_settings(self) -> Dict[str, Any]:
         try:
-            if os.path.exists(self.settings_file):
-                with open(self.settings_file, 'r') as f:
-                    return {**self.default_settings, **json.load(f)}
-            else:
-                # File doesn't exist, create it with default settings
+            if not os.path.exists(self.settings_file) and not os.path.exists(
+                    backup_path(self.settings_file)):
+                # First run: create the file with defaults
                 self.save_defaults()
                 return self.default_settings.copy()
+            stored = read_json_with_backup(self.settings_file, default=None)
+            if not isinstance(stored, dict):
+                logger.error("Settings unreadable and no usable backup; using defaults")
+                return self.default_settings.copy()
+            return {**self.default_settings, **stored}
         except Exception as e:
             logger.error(f"Error loading settings: {e}")
             return self.default_settings.copy()
@@ -314,18 +318,14 @@ class Settings:
     def save_defaults(self) -> None:
         """Create settings file with default values if it doesn't exist"""
         try:
-            os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
-            with open(self.settings_file, 'w') as f:
-                json.dump(self.default_settings, f, indent=4)
+            write_json_atomic(self.settings_file, self.default_settings)
         except Exception as e:
             logger.error(f"Error creating default settings file: {e}")
 
     def save_settings(self) -> None:
         try:
             with self._save_lock:
-                os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
-                with open(self.settings_file, 'w') as f:
-                    json.dump(self.current_settings, f, indent=4)
+                write_json_atomic(self.settings_file, self.current_settings)
         except Exception as e:
             logger.error(f"Error saving settings: {e}")
 

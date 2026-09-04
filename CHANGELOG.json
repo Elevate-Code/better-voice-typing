@@ -9,6 +9,7 @@
         "Pressing Ctrl+Caps Lock and then releasing Ctrl while Caps Lock is still held no longer starts toggling recording on the key's auto-repeat.",
         "If Windows ever fails to deliver a Caps Lock key-release to the app (remote desktop, virtual machines, a stalled keyboard hook), the hotkey recovers on the next press instead of appearing dead until restart.",
         "Holding either Ctrl key now counts for the Ctrl+Caps Lock chord even when the other Ctrl key is released first.",
+        "Settings and transcription history are now saved crash-safely: the file is written to a temp copy and swapped in, and the previous version is kept as a .bak that the app falls back to if the main file is ever missing or corrupt (for example after a power loss mid-save).",
         "Added an automated test suite for the parts most likely to break silently: the Caps Lock hotkey (mashing, holding, chords), ordered chunk delivery in Meeting/Phone sessions, and error classification. Contributors: see tests/README.md."
       ]
     },
