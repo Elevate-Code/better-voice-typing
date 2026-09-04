@@ -294,6 +294,18 @@ class VoiceTypingApp:
             return self.recorder.filename
         return newest_snapshot
 
+    def _seal_recording(self, gen: int) -> Optional[str]:
+        """Rename the recorder's working file to its generation-stamped
+        snapshot (temp_audio.wav.N.wav) so a new recording can't overwrite it
+        mid-transcription. Returns the snapshot path, or None when there is
+        no working file. Raises OSError if the rename fails."""
+        path = self.recorder.filename
+        if not os.path.exists(path):
+            return None
+        snapshot = path + f".{gen}.wav"
+        os.replace(path, snapshot)
+        return snapshot
+
     def toggle_recording(self) -> None:
         with self._toggle_lock:
             if not self.recording:
@@ -397,17 +409,13 @@ class VoiceTypingApp:
                                     "transcribing what was captured")
                 self.recorder.error = None
 
-            # Snapshot path so a new recording can't overwrite the file mid-transcription
-            recording_path = self.recorder.filename
-            if os.path.exists(recording_path):
-                snapshot_path = recording_path + f".{gen}.wav"
-                try:
-                    os.replace(recording_path, snapshot_path)
-                    self.last_recording = snapshot_path
-                except OSError:
-                    self.last_recording = recording_path
-            else:
-                self.last_recording = recording_path
+            # A missing or un-renamable file leaves the bare path, which the
+            # processing thread then reports as a missing recording
+            try:
+                self.last_recording = self._seal_recording(gen) or self.recorder.filename
+            except OSError:
+                self.logger.error("Could not snapshot recording", exc_info=True)
+                self.last_recording = self.recorder.filename
             # Older snapshots are no longer retry candidates; drop them
             self._sweep_snapshots(keep=self.last_recording)
             self.status_manager.set_status(AppStatus.PROCESSING)
@@ -435,17 +443,12 @@ class VoiceTypingApp:
             self._notes.set_state("📤 transcribing…", clear_alert=True)
             self.recorder.stop()
             self._recording_generation += 1
-            gen = self._recording_generation
-            path = self.recorder.filename
-            snapshot: Optional[str] = None
-            if os.path.exists(path):
-                snapshot = path + f".{gen}.wav"
-                try:
-                    os.replace(path, snapshot)
-                except OSError:
-                    snapshot = None
-                    self.logger.error("Could not snapshot chunk; skipping it", exc_info=True)
-                    self._notes.set_alert("⚠️ chunk could not be saved", 5.0)
+            try:
+                snapshot = self._seal_recording(self._recording_generation)
+            except OSError:
+                snapshot = None
+                self.logger.error("Could not snapshot chunk; skipping it", exc_info=True)
+                self._notes.set_alert("⚠️ chunk could not be saved", 5.0)
             # Restart capture before analyzing/queueing the sealed chunk: the
             # snapshot is a closed file, so this shrinks the not-recording gap
             # (where spoken words are lost) to just the stop/restart itself
@@ -497,16 +500,15 @@ class VoiceTypingApp:
                 self.logger.error("Error stopping recorder", exc_info=True)
             self.recorder.auto_stopped = False
             self.recorder.error = None
-            if error and os.path.exists(self.recorder.filename):
+            if error:
                 # Salvage audio captured before the device failed
                 self._recording_generation += 1
-                snapshot = self.recorder.filename + f".{self._recording_generation}.wav"
                 try:
-                    os.replace(self.recorder.filename, snapshot)
-                    if self.recorder.analyze_recording(snapshot)[0]:
+                    snapshot = self._seal_recording(self._recording_generation)
+                    if snapshot and self.recorder.analyze_recording(snapshot)[0]:
                         index = session.submit(snapshot)
                         self.logger.info(f"Salvaged session tail as chunk {index} after recording error")
-                    else:
+                    elif snapshot:
                         os.remove(snapshot)
                 except OSError:
                     self.logger.warning("Could not salvage session tail", exc_info=True)
@@ -861,74 +863,65 @@ class VoiceTypingApp:
         status = 'enabled' if self.clean_transcription_enabled else 'disabled'
         self.logger.info(f"Clean transcription {status}")
 
+    # Meeting and phone mode are mutually exclusive capture strategies: enabling
+    # one disables the other. Both need ElevenLabs (multichannel / diarization).
+    _CONVERSATION_MODES = {
+        'meeting_mode': ('🎧', 'Meeting mode', 'phone_mode'),
+        'phone_mode': ('📞', 'Phone mode', 'meeting_mode'),
+    }
+
     def toggle_meeting_mode(self) -> None:
-        """Toggle meeting mode (mic + system audio with speaker-labeled transcripts).
-
-        Runs under the toggle lock so a caps press can't start a session in the
-        gap between ending the current one and flipping the setting."""
-        with self._toggle_lock:
-            if self._session_active:
-                self._end_session()
-            enabling = not self.settings.get('meeting_mode')
-
-            if enabling:
-                if not api_key_configured('ELEVENLABS_API_KEY'):
-                    self.ui_feedback.show_warning(
-                        "⚠️ Meeting mode needs ELEVENLABS_API_KEY in .env", 5000)
-                    self.logger.warning("Meeting mode not enabled: ELEVENLABS_API_KEY missing")
-                    return
-                # Meeting and phone mode are mutually exclusive capture strategies
-                if self.settings.get('phone_mode'):
-                    self.settings.set('phone_mode', False)
-                    self.logger.info("Phone mode disabled (meeting mode enabled)")
-                from modules.loopback_recorder import loopback_available
-                available, detail = loopback_available()
-                if available:
-                    self.ui_feedback.show_warning(f"🎧 Meeting mode on ({detail})", 3000)
-                else:
-                    # Allow enabling anyway: capture falls back to mic-only per
-                    # recording, and the output device may change before next use
-                    self.ui_feedback.show_warning(
-                        "⚠️ Meeting mode on, but system audio capture unavailable", 5000)
-                    self.logger.warning(f"Loopback unavailable at toggle time: {detail}")
-            else:
-                self.ui_feedback.show_warning("🎧 Meeting mode off", 2000)
-
-            self.settings.set('meeting_mode', enabling)
-            self.logger.info(f"Meeting mode {'enabled' if enabling else 'disabled'}")
-        if self.update_icon_menu:
-            self.update_icon_menu()
+        """Toggle meeting mode (mic + system audio with speaker-labeled transcripts)."""
+        self._toggle_conversation_mode('meeting_mode')
 
     def toggle_phone_mode(self) -> None:
         """Toggle phone mode (mic-only conversation with diarized transcripts).
 
         For conversations happening in the room — a call on speakerphone, an
         in-person chat — where all voices reach the microphone. Speakers are
-        separated by voice diarization instead of by channel.
-        """
+        separated by voice diarization instead of by channel."""
+        self._toggle_conversation_mode('phone_mode')
+
+    def _toggle_conversation_mode(self, key: str) -> None:
+        """Runs under the toggle lock so a caps press can't start a session in
+        the gap between ending the current one and flipping the setting."""
+        icon, label, other = self._CONVERSATION_MODES[key]
+        other_label = self._CONVERSATION_MODES[other][1]
         with self._toggle_lock:
             if self._session_active:
                 self._end_session()
-            enabling = not self.settings.get('phone_mode')
+            enabling = not self.settings.get(key)
 
             if enabling:
                 if not api_key_configured('ELEVENLABS_API_KEY'):
                     self.ui_feedback.show_warning(
-                        "⚠️ Phone mode needs ELEVENLABS_API_KEY in .env", 5000)
-                    self.logger.warning("Phone mode not enabled: ELEVENLABS_API_KEY missing")
+                        f"⚠️ {label} needs ELEVENLABS_API_KEY in .env", 5000)
+                    self.logger.warning(f"{label} not enabled: ELEVENLABS_API_KEY missing")
                     return
-                # Meeting and phone mode are mutually exclusive capture strategies
-                if self.settings.get('meeting_mode'):
-                    self.settings.set('meeting_mode', False)
-                    self.logger.info("Meeting mode disabled (phone mode enabled)")
-                self.ui_feedback.show_warning("📞 Phone mode on (diarized transcripts)", 3000)
+                if self.settings.get(other):
+                    self.settings.set(other, False)
+                    self.logger.info(f"{other_label} disabled ({label.lower()} enabled)")
+                self.ui_feedback.show_warning(*self._mode_on_notice(key))
             else:
-                self.ui_feedback.show_warning("📞 Phone mode off", 2000)
+                self.ui_feedback.show_warning(f"{icon} {label} off", 2000)
 
-            self.settings.set('phone_mode', enabling)
-            self.logger.info(f"Phone mode {'enabled' if enabling else 'disabled'}")
+            self.settings.set(key, enabling)
+            self.logger.info(f"{label} {'enabled' if enabling else 'disabled'}")
         if self.update_icon_menu:
             self.update_icon_menu()
+
+    def _mode_on_notice(self, key: str) -> Tuple[str, int]:
+        """(message, duration_ms) confirming a conversation mode was enabled."""
+        if key == 'phone_mode':
+            return "📞 Phone mode on (diarized transcripts)", 3000
+        from modules.loopback_recorder import loopback_available
+        available, detail = loopback_available()
+        if available:
+            return f"🎧 Meeting mode on ({detail})", 3000
+        # Allow enabling anyway: capture falls back to mic-only per
+        # recording, and the output device may change before next use
+        self.logger.warning(f"Loopback unavailable at toggle time: {detail}")
+        return "⚠️ Meeting mode on, but system audio capture unavailable", 5000
 
     def toggle_streaming_dictation(self) -> None:
         """Toggle streaming dictation (beta): transcribe over a realtime
