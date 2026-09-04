@@ -27,7 +27,7 @@ MIN_DURATION = 1.0
 # WAV comment written into phone-mode recordings so the transcription pipeline
 # can recognize them later (survives snapshots, retries, and app restarts —
 # the mono audio itself is indistinguishable from normal dictation).
-PHONE_RECORDING_COMMENT = 'voice_typing:phone'
+from modules.audio_markers import PHONE_RECORDING_COMMENT  # noqa: E402,F401
 # Time of continuous silence (in seconds) before auto-stopping
 DEFAULT_SILENT_START_TIMEOUT = 4.0
 

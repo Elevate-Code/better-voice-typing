@@ -7,6 +7,7 @@ from typing import Iterator
 # startup fast (the OpenAI SDK in particular is a heavy import).
 # Note: importing Settings also loads .env, so os.environ checks below see
 # the user's configured API keys.
+from modules.audio_markers import DICTATION, MEETING, PHONE, recording_kind
 from modules.settings import Settings, api_key_configured
 
 # OpenAI Speech to text docs: https://platform.openai.com/docs/guides/speech-to-text
@@ -90,42 +91,13 @@ def _default_provider() -> str:
     return 'elevenlabs' if api_key_configured('ELEVENLABS_API_KEY') else 'openai'
 
 
-def is_multichannel_recording(filename: str) -> bool:
-    """True if the file is a 2-channel meeting-mode recording.
-
-    Normal dictation recordings are always mono, so channel count is a
-    reliable marker that survives snapshots, retries, and app restarts.
-    """
-    try:
-        import soundfile as sf
-        return sf.info(filename).channels >= 2
-    except Exception:
-        return False
-
-
-def is_phone_recording(filename: str) -> bool:
-    """True if the file is a phone-mode recording (mono, multiple speakers).
-
-    Phone recordings are plain mono mic audio, so the recorder tags them with
-    a WAV comment — a marker that, like channel count, survives snapshots,
-    retries, and app restarts.
-    """
-    try:
-        import soundfile as sf
-        from modules.recorder import PHONE_RECORDING_COMMENT
-        with sf.SoundFile(filename) as f:
-            return (f.comment or '').startswith(PHONE_RECORDING_COMMENT)
-    except Exception:
-        return False
-
-
 def is_conversation_recording(filename: str) -> bool:
     """True for any multi-speaker recording (meeting or phone mode).
 
     These produce speaker-labeled transcripts, so callers use this to skip
     steps that would mangle the labels (e.g. LLM cleaning).
     """
-    return is_multichannel_recording(filename) or is_phone_recording(filename)
+    return recording_kind(filename) != DICTATION
 
 
 def _get_meeting_transcriber():
@@ -178,16 +150,17 @@ def transcribe_audio(filename: str) -> str:
     Raises:
         Exception: If transcription fails
     """
+    kind = recording_kind(filename)
     # Meeting-mode recordings (2-channel: mic + system audio) always route to
     # ElevenLabs Scribe multichannel, which attributes speakers by channel.
-    if is_multichannel_recording(filename):
+    if kind == MEETING:
         logger.info("Meeting recording detected; using ElevenLabs Scribe multichannel")
         with _tag_provider('elevenlabs'):
             return _get_meeting_transcriber().transcribe(filename)
 
     # Phone-mode recordings (mono, multiple speakers on one mic) route to
     # ElevenLabs Scribe with voice diarization for speaker attribution.
-    if is_phone_recording(filename):
+    if kind == PHONE:
         logger.info("Phone recording detected; using ElevenLabs Scribe diarization")
         with _tag_provider('elevenlabs'):
             return _get_phone_transcriber().transcribe(filename)

@@ -976,11 +976,11 @@ class VoiceTypingApp:
                     if not self.cancel_flag.is_set():
                         self.status_manager.set_status(AppStatus.CLEANING)
 
-                    # Get the configured LLM model and timeout from settings
-                    llm_model = self.settings.get('llm_model')
-                    cleaning_timeout = self.settings.get('cleaning_timeout')
-
-                    cleaned_text = clean_transcription(text, model=llm_model, timeout=cleaning_timeout)
+                    cleaned_text = clean_transcription(
+                        text,
+                        model=self.settings.get('llm_model'),
+                        timeout=self.settings.get('cleaning_timeout'),
+                        base_url=self.settings.get('llm_base_url') or None)
                     self.logger.info("Transcription cleaned successfully")
                     return True, cleaned_text
                 except Exception as e:

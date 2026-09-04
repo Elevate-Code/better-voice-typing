@@ -1,7 +1,7 @@
 """OpenAI Speech-to-Text Service Implementation"""
 import os
 import logging
-from typing import Union
+from typing import Optional, Union
 from pathlib import Path
 import io
 import soundfile as sf
@@ -30,15 +30,16 @@ def _make_brown_noise(samples: int, amplitude: float) -> np.ndarray:
 def _prepare_upload(
     audio_data: Union[bytes, str, Path],
     pad_duration_s: float = 0.0,
-    noise_amplitude: float = NOISE_AMPLITUDE
+    noise_amplitude: float = NOISE_AMPLITUDE,
+    upload_format: str = 'FLAC',
 ) -> io.BytesIO:
     """
     Loads audio (bytes or file path), optionally pads the end with quiet brown
-    noise, and encodes it as FLAC for upload.
+    noise, and encodes it for upload.
 
     FLAC is lossless and roughly halves the upload size versus WAV, which cuts
     request latency and doubles the recording length that fits under OpenAI's
-    25 MB upload cap.
+    25 MB upload cap. Self-hosted servers get WAV, which every server decodes.
     """
     input_stream = io.BytesIO(audio_data) if isinstance(audio_data, bytes) else audio_data
     data, samplerate = sf.read(input_stream, dtype='float32')
@@ -48,34 +49,42 @@ def _prepare_upload(
         data = np.concatenate([data, _make_brown_noise(padding_samples, noise_amplitude)])
 
     buffer = io.BytesIO()
-    sf.write(buffer, data, samplerate, format='FLAC', subtype='PCM_16')
+    sf.write(buffer, data, samplerate, format=upload_format, subtype='PCM_16')
     buffer.seek(0)
-    buffer.name = "audio.flac"
+    buffer.name = f"audio.{upload_format.lower()}"
     return buffer
 
 
 class OpenAITranscriber:
-    """OpenAI STT service implementation supporting Whisper and GPT-4o models"""
+    """Speech-to-text over the OpenAI audio transcription API.
 
-    def __init__(self, model: str = "gpt-4o-mini-transcribe", language: str = "en"):
+    Also the client for any OpenAI-compatible server (see services/custom_stt.py):
+    pass base_url and api_key explicitly."""
+
+    def __init__(self, model: str = "gpt-4o-mini-transcribe", language: str = "en",
+                 api_key: Optional[str] = None, base_url: Optional[str] = None,
+                 upload_format: str = 'FLAC'):
         """
-        Initialize OpenAI transcriber
-
         Args:
             model: Model to use ('whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe')
             language: Language code for transcription (e.g., 'en', 'es', 'fr')
+            api_key: Defaults to OPENAI_API_KEY from the environment
+            base_url: OpenAI-compatible endpoint root (…/v1); None = api.openai.com
+            upload_format: soundfile format name for the upload ('FLAC' or 'WAV')
         """
-        api_key = os.environ.get("OPENAI_API_KEY")
+        api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set")
 
         self.client = OpenAI(
             api_key=api_key,
+            base_url=base_url,
             # Configure timeout: 60s total timeout, 10s connect timeout
             timeout=httpx.Timeout(60.0, connect=10.0)
         )
         self.model = model
         self.language = language
+        self.upload_format = upload_format
 
     def transcribe(self, audio_data: Union[bytes, str, Path]) -> str:
         """
@@ -99,7 +108,8 @@ class OpenAITranscriber:
             if pad_duration:
                 logger.debug(f"Padding audio with {pad_duration}s of quiet noise for {self.model}")
 
-            file_to_send = _prepare_upload(audio_data, pad_duration)
+            file_to_send = _prepare_upload(audio_data, pad_duration,
+                                           upload_format=self.upload_format)
 
             response = self.client.audio.transcriptions.create(
                 model=self.model,

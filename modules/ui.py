@@ -424,68 +424,35 @@ class UIFeedback:
         self._call_on_ui_thread(lambda: self._show_warning_impl(message, duration_ms))
 
     def _show_warning_impl(self, message: str, duration_ms: int) -> None:
-        # Cancel any existing warning timer
-        if self.warning_timer:
-            self.root.after_cancel(self.warning_timer)
-
-        # Update appearance for warning state on all windows
-        self._show_on_top()
-        for indicator, frame, label, level_canvas in zip(
-            self.indicators, self.frames, self.labels, self.level_canvases
-        ):
-            indicator.configure(bg=self.warning_color)
-            frame.configure(bg=self.warning_color)
-            label.configure(
-                bg=self.warning_color,
-                fg='black',  # Dark text for warning state
-                text=message
-            )
-            # Hide the level indicator during warning
-            level_canvas.pack_forget()
-
-        self._position_window()
-        self._schedule_snap()
-
-        # Schedule auto-dismiss
-        self.warning_timer = self.root.after(
-            duration_ms,
-            self._reset_and_hide
-        )
+        self._show_notice(message, duration_ms, retry=False)
 
     def show_error_with_retry(self, message: str, duration_ms: int = 7000) -> None:
         """Show error message with retry option on all windows. Thread-safe."""
-        self._call_on_ui_thread(lambda: self._show_error_with_retry_impl(message, duration_ms))
+        self._call_on_ui_thread(lambda: self._show_notice(message, duration_ms, retry=True))
 
-    def _show_error_with_retry_impl(self, message: str, duration_ms: int) -> None:
-        # Cancel any existing warning timer
+    def _show_notice(self, message: str, duration_ms: int, retry: bool) -> None:
+        """Paint an orange notice on every indicator and auto-dismiss it.
+
+        With retry=True a click on the indicator retries the last recording
+        until the notice is dismissed. Must run on the Tk thread."""
         if self.warning_timer:
             self.root.after_cancel(self.warning_timer)
+        self.retry_available = retry
+        text = f"{message}\n🔄 Click to retry" if retry else message
 
-        self.retry_available = True
-
-        # Update appearance for error state on all windows
         self._show_on_top()
         for indicator, frame, label, level_canvas in zip(
             self.indicators, self.frames, self.labels, self.level_canvases
         ):
             indicator.configure(bg=self.warning_color)
             frame.configure(bg=self.warning_color)
-            label.configure(
-                bg=self.warning_color,
-                fg='black',
-                text=f"{message}\n🔄 Click to retry"
-            )
-            # Hide the level indicator during warning
+            label.configure(bg=self.warning_color, fg='black', text=text)
+            # Hide the level indicator during the notice
             level_canvas.pack_forget()
 
         self._position_window()
         self._schedule_snap()
-
-        # Schedule auto-dismiss
-        self.warning_timer = self.root.after(
-            duration_ms,
-            self._reset_and_hide
-        )
+        self.warning_timer = self.root.after(duration_ms, self._reset_and_hide)
 
     def _reset_and_hide(self) -> None:
         """Reset UI state and hide all indicators"""

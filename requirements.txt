@@ -9,8 +9,7 @@ soundcard==0.4.6  # System-audio (WASAPI loopback) capture for meeting mode
 websocket-client==1.9.0  # OpenAI Realtime websocket for streaming dictation
 
 # AI
-litellm==1.84.0 # model routing
-openai==2.20.0  # litellm 1.84 requires openai>=2.20,<3
+openai==2.20.0  # STT (OpenAI + any OpenAI-compatible server) and transcript cleaning
 httpx==0.28.1  # HTTP client (used directly for OpenAI STT timeouts)
 requests==2.33.0  # For update check
 

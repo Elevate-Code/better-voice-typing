@@ -142,17 +142,13 @@ The Voice Typing Assistant supports connecting to custom Speech-to-Text servers,
 
 ### Compatible Servers
 
-The custom provider works with various endpoint formats:
-- OpenAI-compatible endpoints at `/v1/audio/transcriptions`
-- Simple endpoints at `/transcribe` or `/api/transcribe`
+The custom provider speaks the OpenAI audio API, which is what current local STT servers offer (speaches / faster-whisper-server, whisper.cpp server, the parakeet FastAPI images, LocalAI, vLLM):
 
-The server should accept:
-- A multipart form POST request
-- A field named `file` containing the audio data (WAV format)
-- Returns JSON with the transcription in one of these formats:
-  - `{"segments": [{"text": "transcribed text"}]}` (segmented format)
-  - `{"text": "transcribed text"}` (OpenAI format)
-  - `{"transcription": "transcribed text"}` (alternative format)
+- `POST {custom_stt_base_url}/v1/audio/transcriptions` — `/v1` is appended automatically if your base URL doesn't end with it
+- Multipart form with a `file` field (sent as WAV) and a `model` field
+- Response JSON `{"text": "transcribed text"}`
+
+Servers with their own endpoint shapes (`/transcribe`, `{"segments": …}`) were supported before 1.0 and no longer are; put an OpenAI-compatible façade in front of them.
 
 ### Optional Authentication
 
@@ -240,7 +236,8 @@ Modern STT models are usually accurate enough that an extra cleaning pass isn't 
 If you still want to use the post-processing feature:
 
 1. After the first run, open `settings.json`.
-2. Update the `"llm_model"` value to any provider/model [supported by LiteLLM](https://docs.litellm.ai/docs/providers) (eg. `anthropic/claude-3-5-haiku-latest`).
+2. Set `"llm_model"` to an OpenAI chat model (default `gpt-4o-mini`). To use another provider, set `"llm_base_url"` to any OpenAI-compatible endpoint (Ollama, LM Studio, OpenRouter, …) and `"llm_model"` to a model that server offers. If that server needs its own key, put it in `.env` as `LLM_API_KEY` (otherwise `OPENAI_API_KEY` is sent).
+   - Claude example: `"llm_base_url": "https://api.anthropic.com/v1/"`, `"llm_model": "claude-3-5-haiku-latest"`, and `LLM_API_KEY=<your Anthropic key>` in `.env`.
 3. Save the file and restart the application.
 
 ### Auto-start with Windows

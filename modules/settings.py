@@ -111,7 +111,8 @@ class Settings:
 
             'clean_transcription': False,
             'cleaning_timeout': 10.0,  # Timeout for LLM cleaning in seconds
-            'llm_model': "openai/gpt-4o-mini",
+            'llm_model': "gpt-4o-mini",  # OpenAI chat model used for transcript cleaning
+            'llm_base_url': None,  # OpenAI-compatible server for cleaning (None = api.openai.com)
 
             'selected_microphone': None,
             'favorite_microphones': [],
@@ -198,17 +199,23 @@ class Settings:
         return True
 
     def _migrate_llm_model_prefix(self) -> bool:
-        """litellm >= 1.84 no longer infers the provider from bare model names
-        (e.g. 'claude-3-5-haiku-latest'); prepend the provider prefix."""
+        """1.0: transcript cleaning talks to the OpenAI API directly instead of
+        LiteLLM, so llm_model is a bare OpenAI model name ('gpt-4o-mini').
+        Strip the old 'openai/' prefix; any other provider prefix (for example
+        'anthropic/claude-…') can no longer be served, so fall back to the
+        default and say so in the log."""
         model = self.current_settings.get('llm_model')
-        if isinstance(model, str) and model and '/' not in model:
-            if model.startswith('claude'):
-                self.current_settings['llm_model'] = f'anthropic/{model}'
-                return True
-            if model.startswith(('gpt', 'o1', 'o3', 'o4')):
-                self.current_settings['llm_model'] = f'openai/{model}'
-                return True
-        return False
+        if not isinstance(model, str) or '/' not in model:
+            return False
+        provider, _, bare = model.partition('/')
+        if provider == 'openai' and bare:
+            self.current_settings['llm_model'] = bare
+        else:
+            logger.warning(f"llm_model '{model}' is not supported any more (cleaning is "
+                           f"OpenAI-only; set llm_base_url for a compatible server); "
+                           f"using '{self.default_settings['llm_model']}'")
+            self.current_settings['llm_model'] = self.default_settings['llm_model']
+        return True
 
     def _migrate_silence_timeout(self) -> bool:
         """Renames 'silence_timeout' to 'silent_start_timeout'. Returns True if changes were made."""

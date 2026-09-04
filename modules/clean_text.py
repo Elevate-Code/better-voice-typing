@@ -1,35 +1,18 @@
+"""Optional LLM pass that tidies a raw dictation transcript.
+
+Talks to the OpenAI chat completions API directly (or any OpenAI-compatible
+server via ``base_url``). Before 1.0 this went through LiteLLM, which cost
+~60 MB of dependencies and a multi-second first import for one call.
+"""
 import logging
-from typing import Any, cast
+import os
+from typing import Optional
 
 from modules.settings import Settings
 
-# Get logger
 logger = logging.getLogger('voice_typing')
 
-# Aggressive silencing of LiteLLM logging
-# To work around a compatibility issue: LiteLLM and Python 3.12 (__annotations__ Access Error)
-logging.getLogger('LiteLLM').setLevel(logging.CRITICAL + 1)
-# see: https://github.com/BerriAI/litellm/issues/9424
-# and: https://github.com/BerriAI/litellm/issues/9432
-
-def clean_transcription(text: str, model: str, timeout: float = 45.0) -> str:
-    """
-    Cleans and corrects voice-to-text transcription using LLM models.
-
-    Args:
-        text: The raw transcription text to clean
-        model: The LLM model to use for cleaning
-        timeout: Maximum time to wait for cleaning (in seconds)
-    """
-    # Deferred import: litellm is one of the heaviest imports in the app and
-    # cleaning is optional, so don't pay for it at startup
-    import litellm
-
-    log_text = Settings().get('log_transcript_text')
-    if log_text:
-        logger.info("ORIGINAL: %s", text)
-
-    prompt = """
+CLEANING_PROMPT = """
 Improve transcription clarity by making minimal edits to fix:
 - Fragmented sentences
 - Filler words ("uh", "um")
@@ -72,21 +55,44 @@ IMPROVED: I guess I'm more looking for something that includes the word "Clockif
 </transcription_text>
 
 IMPORTANT: Respond only with the corrected transcription text, nothing else. So the first word of your response should be the first word of the transcription, and the last word of your response should be the last word of the transcription.
-    """.strip().format(text)
+""".strip()
 
-    response_any: Any = litellm.completion(
+
+def clean_transcription(text: str, model: str, timeout: float = 45.0,
+                        base_url: Optional[str] = None) -> str:
+    """Return ``text`` with minimal LLM cleanup, or raise so the caller can
+    fall back to the raw transcript.
+
+    Args:
+        text: raw transcription
+        model: OpenAI chat model name, e.g. 'gpt-4o-mini'
+        timeout: seconds for the whole request (two retries inside the SDK)
+        base_url: OpenAI-compatible server root; None = api.openai.com
+    """
+    # Deferred import: the OpenAI SDK is a heavy import and cleaning is
+    # optional, so don't pay for it at startup
+    from openai import OpenAI
+
+    # LLM_API_KEY lets a compatible server (or Anthropic's OpenAI-compatible
+    # endpoint) use its own key without touching the STT key
+    api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key and not base_url:
+        raise ValueError("OPENAI_API_KEY environment variable not set")
+
+    log_text = Settings().get('log_transcript_text')
+    if log_text:
+        logger.info("ORIGINAL: %s", text)
+
+    client = OpenAI(api_key=api_key or "not-needed", base_url=base_url,
+                    timeout=timeout, max_retries=2)
+    response = client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": CLEANING_PROMPT.format(text)}],
         temperature=0.2,
-        num_retries=2,
-        timeout=timeout
     )
-
-    try:
-        # Safely grab the content while satisfying the type checker
-        cleaned_text = cast(str, response_any.choices[0].message.content)
-    except (AttributeError, IndexError, TypeError):
-        logger.warning("Unexpected LLM response shape – falling back to raw text")
+    cleaned_text = response.choices[0].message.content if response.choices else None
+    if not cleaned_text:
+        logger.warning("Empty LLM response – falling back to raw text")
         cleaned_text = text
 
     if log_text:
