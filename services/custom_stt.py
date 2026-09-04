@@ -5,7 +5,6 @@ from typing import Union, Optional
 from pathlib import Path
 import io
 import requests
-import json
 
 logger = logging.getLogger('voice_typing')
 
@@ -190,8 +189,3 @@ class CustomTranscriber:
             return result
         else:
             return str(result)
-
-    def update_language(self, language: str) -> None:
-        """Update the language used for transcription"""
-        self.language = language
-        logger.info(f"Updated custom STT language to: {language}")

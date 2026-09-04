@@ -1,7 +1,7 @@
 """OpenAI Speech-to-Text Service Implementation"""
 import os
 import logging
-from typing import Union, Optional
+from typing import Union
 from pathlib import Path
 import io
 import soundfile as sf
@@ -111,7 +111,3 @@ class OpenAITranscriber:
         except Exception as e:
             logger.error(f"OpenAI transcription failed: {e}", exc_info=True)
             raise
-
-    def update_language(self, language: str) -> None:
-        """Update the language used for transcription"""
-        self.language = language

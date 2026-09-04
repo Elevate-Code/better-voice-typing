@@ -1,4 +1,3 @@
-import re
 from typing import List, Dict, Optional, NamedTuple
 import sounddevice as sd
 
@@ -220,47 +219,3 @@ def refresh_devices() -> None:
     except Exception:
         time.sleep(0.2)
         sd._initialize()
-
-def get_all_device_variants() -> Dict[str, List[Dict[str, any]]]:
-    """Returns all variants of input devices grouped by device name"""
-    device_groups: Dict[str, List[Dict]] = {}
-
-    for i, device in enumerate(sd.query_devices()):
-        if device['max_input_channels'] > 0:
-            original_name = device['name']
-
-            if original_name not in device_groups:
-                device_groups[original_name] = []
-
-            device_groups[original_name].append({
-                'id': i,
-                'name': original_name,
-                'channels': device['max_input_channels'],
-                'hostapi': device['hostapi'],
-                'default_samplerate': device['default_samplerate']
-            })
-
-    return device_groups
-
-def is_valid_device_id(device_id: int) -> bool:
-    """Checks if a device ID exists in the current device list"""
-    return any(device['id'] == device_id for device in get_input_devices())
-
-if __name__ == '__main__':
-    print("Available Input Devices (Grouped):")
-    print("-----------------------")
-    device_groups = get_all_device_variants()
-    default_id = get_default_device_id()
-
-    for base_name, variants in device_groups.items():
-        print(f"\nDevice: {base_name}")
-        for variant in variants:
-            default_marker = " (Default)" if variant['id'] == default_id else ""
-            print(f"  ID: {variant['id']}{default_marker}")
-            print(f"  Channels: {variant['channels']}")
-            print(f"  Host API: {variant['hostapi']}")
-            print(f"  Sample Rate: {variant['default_samplerate']} Hz")
-            print("  -----------------------")
-
-    print(f"\nTotal unique devices: {len(device_groups)}")
-    print(f"Total variants across all devices: {sum(len(variants) for variants in device_groups.values())}")

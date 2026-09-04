@@ -157,14 +157,9 @@ class ElevenLabsDictationTranscriber(_ScribeTranscriberBase):
     speech vs 17.07% for gpt-4o-transcribe.
     """
 
-    def __init__(self, language: str = 'en', timeout: float = 120.0):
-        super().__init__(timeout=timeout)
+    def __init__(self, language: str = 'en'):
+        super().__init__()
         self.language_code = language or 'en'
-
-    def update_language(self, language: str) -> None:
-        """Change the transcription language (ISO-639-1 code, e.g. 'en')."""
-        if language:
-            self.language_code = language
 
     def _request_data(self) -> dict:
         return {"diarize": "false"}
@@ -176,9 +171,8 @@ class ElevenLabsDictationTranscriber(_ScribeTranscriberBase):
 class ElevenLabsMeetingTranscriber(_ScribeTranscriberBase):
     """Multichannel transcriber: speaker attribution by recording channel."""
 
-    def __init__(self, you_label: str = "Me", them_label: str = "Them",
-                 timeout: float = 120.0):
-        super().__init__(timeout=timeout)
+    def __init__(self, you_label: str = "Me", them_label: str = "Them"):
+        super().__init__()
         self.you_label = you_label
         self.them_label = them_label
 
@@ -218,9 +212,8 @@ class ElevenLabsDiarizedTranscriber(_ScribeTranscriberBase):
                  my_speaker_id: Optional[str] = None,
                  you_label: str = "Me", them_label: str = "Them",
                  use_speaker_library: bool = True,
-                 diarization_threshold: Optional[float] = None,
-                 timeout: float = 120.0):
-        super().__init__(timeout=timeout)
+                 diarization_threshold: Optional[float] = None):
+        super().__init__()
         self.num_speakers = num_speakers
         self.include_labels = labeled
         self.my_speaker_id = my_speaker_id

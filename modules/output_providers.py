@@ -10,7 +10,7 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List
 
 import pyautogui
 import pyperclip

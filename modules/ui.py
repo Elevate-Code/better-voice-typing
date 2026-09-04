@@ -3,11 +3,8 @@ import queue
 import threading
 import time
 import tkinter as tk
-from typing import Optional, Callable, Any, Tuple
+from typing import Optional, Callable, Tuple
 
-from pynput import keyboard
-import pyautogui
-import pyperclip
 
 from modules.status_manager import StatusConfig
 from modules.screen_utils import get_primary_monitor_geometry, get_all_monitor_geometries, MonitorGeometry
@@ -53,13 +50,6 @@ class UIFeedback:
 
         # Create indicator window(s) based on all_displays setting
         self._create_all_windows()
-
-        # Backward compatibility: reference to first window's components
-        self.indicator = self.indicators[0]
-        self.frame = self.frames[0]
-        self.label = self.labels[0]
-        self.level_canvas = self.level_canvases[0]
-        self.level_bar = self.level_bars[0]
 
         # Add pulsing state variables
         self.pulsing = False
@@ -198,14 +188,6 @@ class UIFeedback:
             self.labels.append(label)
             self.level_canvases.append(level_canvas)
             self.level_bars.append(level_bar)
-
-        # Update backward compatibility references
-        if self.indicators:
-            self.indicator = self.indicators[0]
-            self.frame = self.frames[0]
-            self.label = self.labels[0]
-            self.level_canvas = self.level_canvases[0]
-            self.level_bar = self.level_bars[0]
 
     def _configure_size_attributes(self) -> None:
         """Sets UI dimension attributes based on self.size."""
@@ -683,48 +665,3 @@ class UIFeedback:
         except tk.TclError:
             # This can happen if the window is destroyed while the after() call is pending
             pass
-
-
-if __name__ == "__main__":
-    import time
-
-    class UITester:
-        def __init__(self) -> None:
-            print("Starting UI feedback test...")
-            print("Press Caps Lock to toggle recording indicator")
-            print("Press Ctrl+C to exit")
-
-            self.ui = UIFeedback()
-            self.recording = False
-            self.listener = None
-
-        def on_press(self, key: Any) -> None:
-            if key == keyboard.Key.caps_lock:
-                self.recording = not self.recording
-                if self.recording:
-                    print("Recording started")
-                    self.ui.start_listening_animation()
-                else:
-                    print("Recording stopped")
-                    self.ui.stop_listening_animation()
-
-        def run(self) -> None:
-            self.listener = keyboard.Listener(on_press=self.on_press)
-            self.listener.start()
-
-            try:
-                self.ui.root.mainloop()
-            except KeyboardInterrupt:
-                self.cleanup()
-
-        def cleanup(self) -> None:
-            if self.listener:
-                self.listener.stop()
-            if self.recording:
-                self.ui.stop_listening_animation()
-            self.ui.root.destroy()
-            print("\nTest ended")
-
-    # Create and run the tester
-    tester = UITester()
-    tester.run()

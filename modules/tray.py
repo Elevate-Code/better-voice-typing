@@ -4,11 +4,11 @@ import ctypes
 import ctypes.wintypes
 import time
 import logging
-from typing import Any, Dict, Optional, Callable
+from typing import Dict, Optional
 
 import pyperclip
 import pystray
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from modules.audio_manager import get_input_devices, get_default_device_id, create_device_identifier, names_match
 from modules import transcribe
@@ -216,7 +216,6 @@ def create_stt_provider_menu(app):
 
 def create_output_mode_menu(app):
     """Creates menu for output mode selection"""
-    current_mode = app.settings.get('output_mode')
     available_providers = output_providers.get_available_providers()
 
     def make_mode_handler(mode_name: str):
@@ -301,6 +300,19 @@ class TrayIconManager:
             app.settings.set('ui_indicator_position', new_pos)
             app.ui_feedback.set_position(new_pos)
             self.update_menu()
+
+        UI_POSITIONS = [
+            ('Top Left', 'top-left'), ('Top Center', 'top-center'), ('Top Right', 'top-right'),
+            ('Bottom Left', 'bottom-left'), ('Bottom Center', 'bottom-center'),
+            ('Bottom Right', 'bottom-right'),
+        ]
+
+        def position_item(label: str, pos: str) -> pystray.MenuItem:
+            return pystray.MenuItem(
+                label,
+                lambda icon, item, pos=pos: change_ui_position(pos),
+                checked=lambda item, pos=pos: app.settings.get('ui_indicator_position') == pos
+            )
 
         def change_ui_size(new_size: str):
             app.settings.set('ui_indicator_size', new_size)
@@ -388,36 +400,7 @@ class TrayIconManager:
                                 checked=lambda item: app.settings.get('ui_indicator_all_displays')
                             ),
                             pystray.Menu.SEPARATOR,
-                            pystray.MenuItem(
-                                'Top Left',
-                                lambda icon, item: change_ui_position('top-left'),
-                                checked=lambda item: app.settings.get('ui_indicator_position') == 'top-left'
-                            ),
-                            pystray.MenuItem(
-                                'Top Center',
-                                lambda icon, item: change_ui_position('top-center'),
-                                checked=lambda item: app.settings.get('ui_indicator_position') == 'top-center'
-                            ),
-                            pystray.MenuItem(
-                                'Top Right',
-                                lambda icon, item: change_ui_position('top-right'),
-                                checked=lambda item: app.settings.get('ui_indicator_position') == 'top-right'
-                            ),
-                            pystray.MenuItem(
-                                'Bottom Left',
-                                lambda icon, item: change_ui_position('bottom-left'),
-                                checked=lambda item: app.settings.get('ui_indicator_position') == 'bottom-left'
-                            ),
-                            pystray.MenuItem(
-                                'Bottom Center',
-                                lambda icon, item: change_ui_position('bottom-center'),
-                                checked=lambda item: app.settings.get('ui_indicator_position') == 'bottom-center'
-                            ),
-                            pystray.MenuItem(
-                                'Bottom Right',
-                                lambda icon, item: change_ui_position('bottom-right'),
-                                checked=lambda item: app.settings.get('ui_indicator_position') == 'bottom-right'
-                            ),
+                            *[position_item(label, pos) for label, pos in UI_POSITIONS],
                         )
                     ),
                     pystray.MenuItem(

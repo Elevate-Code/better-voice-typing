@@ -1,9 +1,7 @@
 """Multi-provider Speech-to-Text module with Strategy pattern"""
-import os
 import logging
 from contextlib import contextmanager
-from typing import Iterator, Union, Optional
-from pathlib import Path
+from typing import Iterator
 
 # Provider modules are imported lazily inside _get_transcriber to keep app
 # startup fast (the OpenAI SDK in particular is a heavy import).
@@ -163,16 +161,16 @@ def _get_phone_transcriber():
     return _transcriber_cache[key]
 
 
-def transcribe_audio(filename: str, language: Optional[str] = None) -> str:
+def transcribe_audio(filename: str) -> str:
     """
     Transcribe audio using the configured provider
 
     This is the high-level function that the rest of the app calls.
-    It routes to the appropriate provider based on settings.
+    It routes to the appropriate provider based on settings (including the
+    stt_language setting, which is part of each transcriber's cache key).
 
     Args:
         filename: Path to the audio file to transcribe
-        language: Optional language override (uses settings default if not provided)
 
     Returns:
         Transcribed text
@@ -196,27 +194,12 @@ def transcribe_audio(filename: str, language: Optional[str] = None) -> str:
 
     provider = settings.get('stt_provider') or _default_provider()
 
-    # Get language from parameter or settings
-    if language is None:
-        language = settings.get('stt_language') or 'en'
-
     try:
         transcriber = _get_transcriber(provider)
-
-        # Get model info if available
-        model_info = ""
-        if hasattr(transcriber, 'model'):
-            model_info = f"/{transcriber.model}"
-
-        logger.info(f"Using provider: {provider}{model_info}, language: {language}")
-
-        # Update language if provided as parameter
-        if language and hasattr(transcriber, 'update_language'):
-            transcriber.update_language(language)
-
-        # Transcribe the audio
-        result = transcriber.transcribe(filename)
-        return result
+        model_info = f"/{transcriber.model}" if hasattr(transcriber, 'model') else ""
+        logger.info(f"Using provider: {provider}{model_info}, "
+                    f"language: {settings.get('stt_language') or 'en'}")
+        return transcriber.transcribe(filename)
 
     except Exception as e:
         logger.error(f"Transcription failed with provider {provider}: {e}")

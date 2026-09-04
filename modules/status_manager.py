@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Callable
 
 class AppStatus(Enum):
     IDLE = auto()
