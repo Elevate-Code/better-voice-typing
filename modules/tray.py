@@ -1,31 +1,29 @@
-import os
-import threading
-import ctypes
-import ctypes.wintypes
-import time
+"""System tray icon and its context menu (Qt).
+
+The menu is described as a plain ``MenuItem`` tree (testable without Qt) and
+rendered into a ``QMenu`` every time it is about to be shown, so checkmarks
+and device lists are always current. The icon is a microphone glyph painted
+at the current status color, so the tray always matches the overlay.
+Explorer restarts are handled by Qt (it re-adds the icon on TaskbarCreated).
+"""
 import logging
-from typing import Callable, Dict, Optional
+import os
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional
 
 import pyperclip
-import pystray
-from PIL import Image
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
-from modules.audio_manager import get_input_devices, get_default_device_id, create_device_identifier, names_match
 from modules import transcribe
+from modules.audio_manager import (create_device_identifier, get_default_device_id,
+                                   get_input_devices, names_match)
 from modules.logger import get_log_dir
-from modules.paths import APP_DIR, app_version
+from modules.paths import APP_NAME, app_version
 from modules.settings import ENV_FILE
 
-# Windows constants for TaskbarCreated message
-WM_USER = 0x0400
-ICON_WATCHDOG_INTERVAL = 30  # Check icon health every 30 seconds
-ICON_RESTART_DELAY = 2  # Wait 2 seconds before restarting icon after failure
-
 logger = logging.getLogger('voice_typing')
-
-def create_tray_icon(icon_path: str) -> Image.Image:
-    """Load a bundled tray icon (path relative to the app resources)."""
-    return Image.open(APP_DIR / icon_path)
 
 UI_POSITIONS = [
     ('Top Left', 'top-left'), ('Top Center', 'top-center'), ('Top Right', 'top-right'),
@@ -34,46 +32,141 @@ UI_POSITIONS = [
 ]
 
 
+@dataclass
+class MenuItem:
+    """One entry of the tray menu. ``checked`` None = no checkmark slot;
+    ``children`` makes a submenu; ``separator`` ignores everything else."""
+    label: str = ''
+    action: Optional[Callable[[], None]] = None
+    checked: Optional[bool] = None
+    enabled: bool = True
+    children: Optional[List['MenuItem']] = None
+    default: bool = False
+    separator: bool = False
+
+
+SEPARATOR = MenuItem(separator=True)
+
+
 def make_position_items(get_position: Callable[[], Optional[str]],
-                        set_position: Callable[[str], None]) -> list:
-    """Radio-style menu items for the indicator position.
+                        set_position: Callable[[str], None]) -> List[MenuItem]:
+    """Radio-style items for the indicator corner."""
+    current = get_position()
 
-    pystray validates action signatures strictly: an action must take
-    exactly (icon, item) — a lambda with an extra defaulted parameter is
-    rejected at construction and the whole icon fails to build. Bind the
-    position with a closure factory instead."""
-    def item(label: str, pos: str) -> pystray.MenuItem:
-        def activate(icon, item) -> None:
-            set_position(pos)
-
-        def is_checked(item) -> bool:
-            return get_position() == pos
-        return pystray.MenuItem(label, activate, checked=is_checked)
+    def item(label: str, pos: str) -> MenuItem:
+        return MenuItem(label, lambda: set_position(pos), checked=(current == pos))
     return [item(label, pos) for label, pos in UI_POSITIONS]
 
 
-def create_copy_menu(app):
-    """Creates dynamic menu of recent transcriptions"""
-    def make_copy_handler(text):
-        return lambda icon, item: pyperclip.copy(text)
+def populate_menu(menu: QMenu, items: List[MenuItem]) -> None:
+    """Render a MenuItem tree into a QMenu (replacing its contents)."""
+    menu.clear()
+    for item in items:
+        if item.separator:
+            menu.addSeparator()
+            continue
+        if item.children is not None:
+            sub = menu.addMenu(item.label)
+            sub.setEnabled(item.enabled)
+            populate_menu(sub, item.children)
+            continue
+        action = QAction(item.label, menu)
+        action.setEnabled(item.enabled)
+        if item.checked is not None:
+            action.setCheckable(True)
+            action.setChecked(item.checked)
+        if item.action is not None:
+            action.triggered.connect(lambda _checked=False, fn=item.action: fn())
+        if item.default:
+            font = action.font()
+            font.setBold(True)
+            action.setFont(font)
+            menu.setDefaultAction(action)
+        menu.addAction(action)
 
-    return [
-        pystray.MenuItem(
-            app.history.get_preview(text),
-            make_copy_handler(text)
-        )
-        for text in app.history.get_recent()
-    ]
 
-def create_microphone_menu(app):
-    """Creates dynamic menu of available microphones.
+# ---- icon ----------------------------------------------------------------
+
+def dark_taskbar() -> bool:
+    """Windows: is the taskbar/tray dark (so a light glyph is needed)?"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            value, _ = winreg.QueryValueEx(k, "SystemUsesLightTheme")
+            return int(value) == 0
+    except Exception:
+        return True
+
+
+def tray_color(ui_color: str, idle: bool) -> str:
+    """Glyph color for a status: idle follows the taskbar theme; active
+    statuses use the overlay color, lightened when it would vanish on a
+    dark taskbar."""
+    dark = dark_taskbar()
+    if idle:
+        return '#F2F2F2' if dark else '#1F1F1F'
+    c = QColor(ui_color)
+    if dark and c.lightnessF() < 0.3:
+        c = c.lighter(180)
+    return c.name()
+
+
+def _paint_mic(pixmap: QPixmap, color: str) -> None:
+    s = pixmap.width()
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    col = QColor(color)
+    # Capsule
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(col)
+    cap = QRectF(s * 0.35, s * 0.06, s * 0.30, s * 0.52)
+    p.drawRoundedRect(cap, s * 0.15, s * 0.15)
+    # Cradle arc, stem and base
+    pen = QPen(col, max(1.5, s * 0.09), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    arc = QRectF(s * 0.20, s * 0.22, s * 0.60, s * 0.52)
+    p.drawArc(arc, 180 * 16, 180 * 16)
+    p.drawLine(QPointF(s * 0.5, s * 0.74), QPointF(s * 0.5, s * 0.88))
+    p.drawLine(QPointF(s * 0.34, s * 0.90), QPointF(s * 0.66, s * 0.90))
+    p.end()
+
+
+_icon_cache: Dict[str, QIcon] = {}
+
+
+def make_tray_icon(color: str) -> QIcon:
+    """Microphone glyph in ``color`` at the sizes Windows asks for."""
+    icon = _icon_cache.get(color)
+    if icon is None:
+        icon = QIcon()
+        for size in (16, 20, 24, 32, 48, 64):
+            pm = QPixmap(size, size)
+            pm.fill(Qt.GlobalColor.transparent)
+            _paint_mic(pm, color)
+            icon.addPixmap(pm)
+        _icon_cache[color] = icon
+    return icon
+
+
+# ---- menu model ----------------------------------------------------------
+
+def create_copy_menu(app) -> List[MenuItem]:
+    """Recent transcriptions; clicking one copies it."""
+    def copier(text: str) -> Callable[[], None]:
+        return lambda: pyperclip.copy(text)
+    return [MenuItem(app.history.get_preview(text), copier(text))
+            for text in app.history.get_recent()]
+
+
+def create_microphone_menu(app) -> List[MenuItem]:
+    """Device selection and favorites.
 
     Devices are matched to saved settings by name rather than full identifier
     (name, channels, samplerate): the same physical device can report
     different specs via different host APIs, and exact-tuple equality made
-    selection checkmarks and favorites silently stop matching. The checked
-    callables read settings live so the menu stays truthful even between
-    rebuilds."""
+    selection checkmarks and favorites silently stop matching."""
     devices = sorted(get_input_devices(), key=lambda d: d['name'].lower())
     try:
         default_device_id = get_default_device_id()
@@ -82,475 +175,209 @@ def create_microphone_menu(app):
         default_device_id = None
 
     def is_favorite(device: Dict[str, any]) -> bool:
-        return any(isinstance(f, dict) and
-                   names_match(f.get('name') or '', device['name'])
+        return any(isinstance(f, dict) and names_match(f.get('name') or '', device['name'])
                    for f in app.settings.get('favorite_microphones'))
 
     def is_selected(device: Dict[str, any]) -> bool:
         selected = app.settings.get('selected_microphone')
-        return (isinstance(selected, dict) and
-                names_match(selected.get('name') or '', device['name']))
+        return isinstance(selected, dict) and names_match(selected.get('name') or '', device['name'])
 
-    def make_mic_handler(device: Dict[str, any]):
-        def handler(icon, item):
-            app.set_microphone(device['id'])
-            app.update_icon_menu()
-        return handler
+    def select(device: Dict[str, any]) -> Callable[[], None]:
+        return lambda: app.set_microphone(device['id'])
 
-    def make_favorite_handler(device: Dict[str, any]):
-        def handler(icon, item):
-            favorites = [f for f in app.settings.get('favorite_microphones')
-                         if isinstance(f, dict)]
+    def toggle_favorite(device: Dict[str, any]) -> Callable[[], None]:
+        def handler() -> None:
+            favorites = [f for f in app.settings.get('favorite_microphones') if isinstance(f, dict)]
             if is_favorite(device):
                 favorites = [f for f in favorites
                              if not names_match(f.get('name') or '', device['name'])]
             else:
                 favorites.append(create_device_identifier(device)._asdict())
             app.settings.set('favorite_microphones', favorites)
-            app.update_icon_menu()
         return handler
 
-    def make_select_item(device: Dict[str, any]) -> pystray.MenuItem:
+    def select_item(device: Dict[str, any]) -> MenuItem:
         prefix = ("💫 " if is_favorite(device) else "") + \
                  ("🎙️ " if device['id'] == default_device_id else "")
-        return pystray.MenuItem(
-            f"{prefix}{device['name']}",
-            make_mic_handler(device),
-            checked=lambda item, dev=device: is_selected(dev)
-        )
+        return MenuItem(f"{prefix}{device['name']}", select(device), checked=is_selected(device))
 
-    # Favorites pinned above the rest (alphabetical within each group)
     favorite_devices = [d for d in devices if is_favorite(d)]
     other_devices = [d for d in devices if not is_favorite(d)]
-    select_items = [make_select_item(d) for d in favorite_devices]
+    select_items = [select_item(d) for d in favorite_devices]
     if favorite_devices and other_devices:
-        select_items.append(pystray.Menu.SEPARATOR)
-    select_items.extend(make_select_item(d) for d in other_devices)
-
-    favorite_items = [
-        pystray.MenuItem(
-            device['name'],
-            make_favorite_handler(device),
-            checked=lambda item, dev=device: is_favorite(dev)
-        )
-        for device in devices
-    ]
+        select_items.append(SEPARATOR)
+    select_items.extend(select_item(d) for d in other_devices)
+    favorite_items = [MenuItem(d['name'], toggle_favorite(d), checked=is_favorite(d)) for d in devices]
 
     return [
-        pystray.MenuItem(
-            'Select Device',
-            pystray.Menu(*select_items)
-        ),
-        pystray.MenuItem(
-            'Manage Favorites',
-            pystray.Menu(*favorite_items)
-        ),
-        pystray.MenuItem('Refresh Devices', lambda icon, item: app.refresh_microphones())
+        MenuItem('Select Device', children=select_items or [MenuItem('No input devices', enabled=False)]),
+        MenuItem('Manage Favorites', children=favorite_items or [MenuItem('No input devices', enabled=False)]),
+        MenuItem('Refresh Devices', app.refresh_microphones),
     ]
 
-def create_stt_provider_menu(app):
-    """Creates menu for STT provider and model selection"""
-    # stored None = automatic (resolved from available API keys)
+
+def create_stt_provider_menu(app) -> List[MenuItem]:
+    """Provider (stored None = automatic) and OpenAI model selection."""
     stored_provider = app.settings.get('stt_provider')
     current_provider = transcribe.get_current_provider()
-    available_providers = transcribe.get_available_providers()
+    available = transcribe.get_available_providers()
 
-    def make_provider_handler(provider_name: str):
-        def handler(icon, item):
+    def choose_provider(name: str) -> Callable[[], None]:
+        def handler() -> None:
             try:
-                transcribe.set_stt_provider(provider_name)
-                app.update_icon_menu()
+                transcribe.set_stt_provider(name)
             except Exception as e:
                 logger.error(f"Error changing STT provider: {e}")
         return handler
 
-    def auto_provider_handler(icon, item):
-        app.settings.set('stt_provider', None)
-        app.update_icon_menu()
+    def choose_model(model: str) -> Callable[[], None]:
+        return lambda: app.settings.set('openai_stt_model', model)
 
-    def make_model_handler(model: str):
-        def handler(icon, item):
-            app.settings.set('openai_stt_model', model)
-            app.update_icon_menu()
-        return handler
+    resolved = next((p['display_name'] for p in available if p['name'] == current_provider),
+                    current_provider)
+    provider_items = [MenuItem(f'Automatic ({resolved})',
+                               lambda: app.settings.set('stt_provider', None),
+                               checked=stored_provider is None)]
+    provider_items += [MenuItem(p['display_name'], choose_provider(p['name']),
+                                checked=p['name'] == stored_provider) for p in available]
 
-    # Create provider selection items; Automatic shows what it resolves to
-    resolved_name = next((p['display_name'] for p in available_providers
-                          if p['name'] == current_provider), current_provider)
-    provider_items = [
-        pystray.MenuItem(
-            f'Automatic ({resolved_name})',
-            auto_provider_handler,
-            checked=lambda item: stored_provider is None
-        )
-    ]
-    for provider in available_providers:
-        provider_items.append(
-            pystray.MenuItem(
-                provider['display_name'],
-                make_provider_handler(provider['name']),
-                checked=lambda item, p=provider: p['name'] == stored_provider
-            )
-        )
-
-    # Create model selection items (only for OpenAI currently)
-    model_items = []
+    items = [MenuItem('Provider', children=provider_items)]
     if current_provider == 'openai':
         current_model = app.settings.get('openai_stt_model')
-        openai_provider = next((p for p in available_providers if p['name'] == 'openai'), None)
+        openai_provider = next((p for p in available if p['name'] == 'openai'), None)
         if openai_provider:
-            for model in openai_provider['models']:
-                display_name = {
-                    'gpt-4o-transcribe': 'GPT-4o (Best)',
-                    'gpt-4o-mini-transcribe': 'GPT-4o Mini',
-                    'whisper-1': 'Whisper (Legacy)',
-                }.get(model, model)
+            names = {'gpt-4o-transcribe': 'GPT-4o (Best)', 'gpt-4o-mini-transcribe': 'GPT-4o Mini',
+                     'whisper-1': 'Whisper (Legacy)'}
+            items.append(MenuItem('OpenAI Model', children=[
+                MenuItem(names.get(m, m), choose_model(m), checked=(m == current_model))
+                for m in openai_provider['models']]))
+    return items
 
-                model_items.append(
-                    pystray.MenuItem(
-                        display_name,
-                        make_model_handler(model),
-                        checked=lambda item, m=model: m == current_model
-                    )
-                )
 
-    menu_items = []
+def build_tray_menu(app, manager: 'TrayIconManager') -> List[MenuItem]:
+    """The whole tray menu for the app's current state."""
+    settings = app.settings
+    recent = create_copy_menu(app)
 
-    # Add provider selection
-    menu_items.append(
-        pystray.MenuItem(
-            'Provider',
-            pystray.Menu(*provider_items) if provider_items else pystray.Menu(
-                pystray.MenuItem('No providers available', None, enabled=False)
-            )
-        )
-    )
+    def copy_latest() -> None:
+        texts = app.history.get_recent()
+        if texts:
+            pyperclip.copy(texts[0])
 
-    # Add model selection (only shown for OpenAI)
-    if model_items:
-        menu_items.append(
-            pystray.MenuItem(
-                'OpenAI Model',
-                pystray.Menu(*model_items)
-            )
-        )
+    def set_position(pos: str) -> None:
+        settings.set('ui_indicator_position', pos)
+        app.ui_feedback.set_position(pos)
 
-    return menu_items
+    def set_size(size: str) -> None:
+        settings.set('ui_indicator_size', size)
+        app.ui_feedback.set_size(size)
 
+    def toggle_all_displays() -> None:
+        value = not settings.get('ui_indicator_all_displays')
+        settings.set('ui_indicator_all_displays', value)
+        app.ui_feedback.set_all_displays(value)
+
+    indicator_items = [
+        MenuItem('Normal Size', lambda: set_size('normal'), checked=settings.get('ui_indicator_size') == 'normal'),
+        MenuItem('Mini Size', lambda: set_size('mini'), checked=settings.get('ui_indicator_size') == 'mini'),
+        SEPARATOR,
+        MenuItem('Show on All Displays', toggle_all_displays,
+                 checked=bool(settings.get('ui_indicator_all_displays'))),
+        SEPARATOR,
+        *make_position_items(lambda: settings.get('ui_indicator_position'), set_position),
+    ]
+
+    return [
+        MenuItem(f'Open {APP_NAME}', app.show_main_window, default=True),
+        SEPARATOR,
+        MenuItem('Copy Last Transcription', copy_latest, enabled=bool(recent)),
+        MenuItem('🔄 Retry Last Transcription', app.retry_transcription,
+                 enabled=app.last_recording is not None),
+        MenuItem('Recent Transcriptions', children=recent or [MenuItem('No transcriptions yet', enabled=False)],
+                 enabled=bool(recent)),
+        MenuItem('Microphone', children=create_microphone_menu(app)),
+        MenuItem('🎧 Meeting Mode', app.toggle_meeting_mode, checked=bool(settings.get('meeting_mode'))),
+        MenuItem('📞 Phone Mode', app.toggle_phone_mode, checked=bool(settings.get('phone_mode'))),
+        MenuItem('Quick Settings', children=[
+            MenuItem('Clean Transcription', app.toggle_clean_transcription,
+                     checked=bool(settings.get('clean_transcription'))),
+            MenuItem('Streaming Dictation (Beta)', app.toggle_streaming_dictation,
+                     checked=bool(settings.get('streaming_dictation'))),
+            MenuItem('Silent-Start Timeout', app.toggle_silence_detection,
+                     checked=settings.get('silent_start_timeout') is not None),
+            MenuItem('Recording Indicator', children=indicator_items),
+            MenuItem('Speech-to-Text', children=create_stt_provider_menu(app)),
+            SEPARATOR,
+            MenuItem('Open Settings File', lambda: os.startfile(settings.settings_file)),
+            MenuItem('Open API Keys (.env)', lambda: os.startfile(str(ENV_FILE))),
+            MenuItem('Open Logs Folder', lambda: os.startfile(str(get_log_dir()))),
+        ]),
+        SEPARATOR,
+        MenuItem(f'Check for Updates (v{app_version()})', app.check_for_updates),
+        MenuItem('Restart', app.restart_app),
+        MenuItem('Exit', manager.exit_app),
+    ]
+
+
+# ---- manager ---------------------------------------------------------------
 
 class TrayIconManager:
-    """
-    Manages the system tray icon with automatic recovery from failures.
+    """Owns the QSystemTrayIcon. Must be created on the main thread after
+    the QApplication exists (UIFeedback creates it)."""
 
-    Handles:
-    - Creating and running the tray icon
-    - Automatic restart on thread crash
-    - Periodic health checks (watchdog)
-    - Recovery from Explorer.exe restart
-    """
-
-    def __init__(self, app):
+    def __init__(self, app) -> None:
         self.app = app
-        self.icon: Optional[pystray.Icon] = None
-        self.icon_thread: Optional[threading.Thread] = None
-        self.watchdog_thread: Optional[threading.Thread] = None
-        self.running = False
-        self.icon_lock = threading.Lock()
-        self.restart_count = 0
-        self.last_restart_time = 0
+        self.menu = QMenu()
+        self.menu.aboutToShow.connect(self._rebuild_menu)
+        self.icon = QSystemTrayIcon(make_tray_icon(tray_color('#333333', idle=True)))
+        self.icon.setToolTip(APP_NAME)
+        self.icon.setContextMenu(self.menu)
+        self.icon.activated.connect(self._activated)
+        self.icon.show()
+        logger.info("Tray icon started")
 
-        # Register for TaskbarCreated message (for Explorer restart detection)
-        self._taskbar_created_msg = self._register_taskbar_created_message()
-
-    def _register_taskbar_created_message(self) -> int:
-        """Register the TaskbarCreated window message."""
+    def _rebuild_menu(self) -> None:
         try:
-            RegisterWindowMessage = ctypes.windll.user32.RegisterWindowMessageW
-            RegisterWindowMessage.argtypes = [ctypes.wintypes.LPCWSTR]
-            RegisterWindowMessage.restype = ctypes.wintypes.UINT
-            msg_id = RegisterWindowMessage("TaskbarCreated")
-            logger.debug(f"Registered TaskbarCreated message: {msg_id}")
-            return msg_id
-        except Exception as e:
-            logger.warning(f"Failed to register TaskbarCreated message: {e}")
-            return 0
+            populate_menu(self.menu, build_tray_menu(self.app, self))
+        except Exception:
+            logger.exception("Failed to build tray menu")
+            populate_menu(self.menu, [MenuItem('Menu unavailable (see log)', enabled=False),
+                                      MenuItem('Exit', self.exit_app)])
 
-    def _create_icon(self) -> pystray.Icon:
-        """Create a new tray icon instance."""
-        icon = pystray.Icon(
-            'Voice Typing',
-            icon=create_tray_icon('assets/microphone-blue.png')
-        )
-        icon.menu = self._get_menu()
-        return icon
-
-    def _get_menu(self):
-        """Generate the context menu for the tray icon."""
-        app = self.app
-        copy_menu = create_copy_menu(app)
-        microphone_menu = create_microphone_menu(app)
-        stt_menu = create_stt_provider_menu(app)
-
-        def copy_latest_transcription(icon, item) -> None:
-            recent_texts = app.history.get_recent()
-            if recent_texts:
-                pyperclip.copy(recent_texts[0])
-
-        def change_ui_position(new_pos: str):
-            app.settings.set('ui_indicator_position', new_pos)
-            app.ui_feedback.set_position(new_pos)
-            self.update_menu()
-
-        position_items = make_position_items(
-            lambda: app.settings.get('ui_indicator_position'), change_ui_position)
-
-        def change_ui_size(new_size: str):
-            app.settings.set('ui_indicator_size', new_size)
-            app.ui_feedback.set_size(new_size)
-            self.update_menu()
-
-        def toggle_all_displays():
-            current = app.settings.get('ui_indicator_all_displays')
-            app.settings.set('ui_indicator_all_displays', not current)
-            app.ui_feedback.set_all_displays(not current)
-            self.update_menu()
-
-        def on_exit(icon, item):
-            app.logger.info("Application exiting.")
-            self.stop()
-            os._exit(0)
-
-        return pystray.Menu(
-            pystray.MenuItem(
-                'Copy Last Transcription',
-                copy_latest_transcription,
-                default=True
-            ),
-            pystray.MenuItem(
-                '🔄 Retry Last Transcription',
-                lambda icon, item: app.retry_transcription(),
-                enabled=lambda item: app.last_recording is not None
-            ),
-            pystray.MenuItem(
-                'Recent Transcriptions',
-                pystray.Menu(*copy_menu) if copy_menu else pystray.Menu(
-                    pystray.MenuItem('No transcriptions yet', None, enabled=False)
-                ),
-                enabled=bool(copy_menu)
-            ),
-            pystray.MenuItem(
-                'Microphone',
-                pystray.Menu(*microphone_menu)
-            ),
-            pystray.MenuItem(
-                '🎧 Meeting Mode',
-                lambda icon, item: app.toggle_meeting_mode(),
-                checked=lambda item: bool(app.settings.get('meeting_mode'))
-            ),
-            pystray.MenuItem(
-                '📞 Phone Mode',
-                lambda icon, item: app.toggle_phone_mode(),
-                checked=lambda item: bool(app.settings.get('phone_mode'))
-            ),
-            pystray.MenuItem(
-                'Settings',
-                pystray.Menu(
-                    pystray.MenuItem(
-                        'Clean Transcription',
-                        lambda icon, item: app.toggle_clean_transcription(),
-                        checked=lambda item: app.settings.get('clean_transcription')
-                    ),
-                    pystray.MenuItem(
-                        'Streaming Dictation (Beta)',
-                        lambda icon, item: app.toggle_streaming_dictation(),
-                        checked=lambda item: bool(app.settings.get('streaming_dictation'))
-                    ),
-                    pystray.MenuItem(
-                        'Silent-Start Timeout',
-                        lambda icon, item: app.toggle_silence_detection(),
-                        checked=lambda item: app.settings.get('silent_start_timeout') is not None
-                    ),
-                    pystray.MenuItem(
-                        'Recording Indicator',
-                        pystray.Menu(
-                            pystray.MenuItem(
-                                'Normal Size',
-                                lambda icon, item: change_ui_size('normal'),
-                                checked=lambda item: app.settings.get('ui_indicator_size') == 'normal'
-                            ),
-                            pystray.MenuItem(
-                                'Mini Size',
-                                lambda icon, item: change_ui_size('mini'),
-                                checked=lambda item: app.settings.get('ui_indicator_size') == 'mini'
-                            ),
-                            pystray.Menu.SEPARATOR,
-                            pystray.MenuItem(
-                                'Show on All Displays',
-                                lambda icon, item: toggle_all_displays(),
-                                checked=lambda item: app.settings.get('ui_indicator_all_displays')
-                            ),
-                            pystray.Menu.SEPARATOR,
-                            *position_items,
-                        )
-                    ),
-                    pystray.MenuItem(
-                        'Speech-to-Text',
-                        pystray.Menu(*stt_menu)
-                    ),
-                    pystray.Menu.SEPARATOR,
-                    pystray.MenuItem(
-                        'Open Settings File',
-                        lambda icon, item: os.startfile(app.settings.settings_file)
-                    ),
-                    pystray.MenuItem(
-                        'Open API Keys (.env)',
-                        lambda icon, item: os.startfile(str(ENV_FILE))
-                    ),
-                    pystray.MenuItem(
-                        'Open Logs Folder',
-                        lambda icon, item: os.startfile(str(get_log_dir()))
-                    )
-                )
-            ),
-            pystray.MenuItem(f'Check for Updates (v{app_version()})',
-                             lambda icon, item: app.check_for_updates()),
-            pystray.MenuItem('Restart', lambda icon, item: app.restart_app()),
-            pystray.MenuItem('Exit', on_exit)
-        )
-
-    def update_menu(self) -> None:
-        """Update the tray icon's menu."""
-        with self.icon_lock:
-            if self.icon:
-                try:
-                    self.icon.menu = self._get_menu()
-                except Exception as e:
-                    logger.warning(f"Failed to update menu: {e}")
+    def _activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.app.show_main_window()
 
     def update_icon(self, emoji_prefix: str, tooltip_text: str) -> None:
-        """Update both the tray icon image and tooltip."""
-        with self.icon_lock:
-            if self.icon:
-                try:
-                    self.icon.icon = create_tray_icon(
-                        self.app.status_manager.current_config.tray_icon_file
-                    )
-                    self.icon.title = f"{emoji_prefix} {tooltip_text}"
-                except Exception as e:
-                    logger.warning(f"Failed to update tray icon: {e}")
+        """Recolor the icon for the current status and set the tooltip. Thread-safe."""
+        def impl() -> None:
+            config = self.app.status_manager.current_config
+            idle = config.ui_text == "Ready"
+            self.icon.setIcon(make_tray_icon(tray_color(config.ui_color, idle)))
+            self.icon.setToolTip(f"{emoji_prefix} {tooltip_text}")
+        self.app.ui_feedback.call_on_main(impl)
 
-    def _run_icon(self) -> None:
-        """Run the tray icon with exception handling."""
-        while self.running:
-            try:
-                with self.icon_lock:
-                    self.icon = self._create_icon()
+    def update_menu(self) -> None:
+        """The menu is rebuilt on every open, so nothing to do eagerly."""
 
-                logger.info("Tray icon starting")
-                self.icon.run()
+    def show_message(self, title: str, body: str, ms: int = 5000) -> None:
+        self.app.ui_feedback.call_on_main(
+            lambda: self.icon.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, ms))
 
-                # If we get here, icon.run() returned normally (icon was stopped)
-                logger.info("Tray icon stopped normally")
-                break
-
-            except Exception as e:
-                logger.error(f"Tray icon crashed: {e}", exc_info=True)
-
-                with self.icon_lock:
-                    self.icon = None
-
-                if not self.running:
-                    break
-
-                # Rate limit restarts
-                current_time = time.time()
-                if current_time - self.last_restart_time < 10:
-                    self.restart_count += 1
-                else:
-                    self.restart_count = 1
-                self.last_restart_time = current_time
-
-                if self.restart_count > 5:
-                    logger.error("Tray icon crashed too many times, giving up")
-                    break
-
-                logger.info(f"Restarting tray icon in {ICON_RESTART_DELAY}s (attempt {self.restart_count})")
-                time.sleep(ICON_RESTART_DELAY)
-
-    def _watchdog(self) -> None:
-        """Periodically check if the tray icon is healthy and restart if needed."""
-        logger.info("Tray icon watchdog started")
-
-        while self.running:
-            time.sleep(ICON_WATCHDOG_INTERVAL)
-
-            if not self.running:
-                break
-
-            with self.icon_lock:
-                icon_exists = self.icon is not None
-                thread_alive = self.icon_thread and self.icon_thread.is_alive()
-
-            if not icon_exists or not thread_alive:
-                logger.warning("Watchdog detected tray icon is dead, restarting...")
-                self._restart_icon()
-
-    def _restart_icon(self) -> None:
-        """Restart the tray icon."""
-        with self.icon_lock:
-            # Stop existing icon if any
-            if self.icon:
-                try:
-                    self.icon.stop()
-                except Exception:
-                    pass
-                self.icon = None
-
-        # Wait for old thread to finish
-        if self.icon_thread and self.icon_thread.is_alive():
-            self.icon_thread.join(timeout=2)
-
-        # Start new icon thread
-        if self.running:
-            self.icon_thread = threading.Thread(target=self._run_icon, daemon=True)
-            self.icon_thread.start()
-            logger.info("Tray icon restarted by watchdog")
-
-    def start(self) -> None:
-        """Start the tray icon and watchdog."""
-        self.running = True
-
-        # Start the icon thread
-        self.icon_thread = threading.Thread(target=self._run_icon, daemon=True)
-        self.icon_thread.start()
-
-        # Start the watchdog thread
-        self.watchdog_thread = threading.Thread(target=self._watchdog, daemon=True)
-        self.watchdog_thread.start()
-
-        logger.info("Tray icon manager started")
+    def exit_app(self) -> None:
+        self.app.logger.info("Application exiting.")
+        self.stop()
+        os._exit(0)
 
     def stop(self) -> None:
-        """Stop the tray icon and watchdog."""
-        logger.info("Stopping tray icon manager")
-        self.running = False
+        self.icon.hide()
 
-        with self.icon_lock:
-            if self.icon:
-                try:
-                    self.icon.stop()
-                except Exception:
-                    pass
-                self.icon = None
 
-def setup_tray_icon(app):
-    """Set up the system tray icon with automatic recovery."""
+def setup_tray_icon(app) -> TrayIconManager:
+    """Create the tray icon and expose its hooks on the app."""
     manager = TrayIconManager(app)
-
-    # Store references on app for external access
     app.tray_manager = manager
     app.update_tray_tooltip = manager.update_icon
     app.update_icon_menu = manager.update_menu
-
-    # Start the tray icon
-    manager.start()
+    return manager

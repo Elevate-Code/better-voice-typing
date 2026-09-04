@@ -24,7 +24,6 @@ hiddenimports = [
     'soundcard.mediafoundation',
     'pynput.keyboard._win32',
     'pynput.mouse._win32',
-    'pystray._win32',
 ]
 
 a = Analysis(

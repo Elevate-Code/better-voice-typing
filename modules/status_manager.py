@@ -23,7 +23,6 @@ RECORDING_STATUSES = frozenset({
 @dataclass
 class StatusConfig:
     tray_icon: str  # Emoji for tooltip
-    tray_icon_file: str  # Path to icon file
     ui_color: str  # Must be valid hex color (e.g., '#FF0000')
     ui_text: str
     tooltip_text: str  # New field for tray tooltip
@@ -34,7 +33,6 @@ class StatusManager:
     STATUS_CONFIGS: Dict[AppStatus, StatusConfig] = {
         AppStatus.IDLE: StatusConfig(
             tray_icon="🎤",
-            tray_icon_file='assets/microphone-blue.png',
             ui_color='#333333',
             ui_text="Ready",
             tooltip_text="Better Voice Typing",
@@ -42,9 +40,8 @@ class StatusManager:
         ),
         AppStatus.RECORDING: StatusConfig(
             tray_icon="⚫",
-            tray_icon_file='assets/microphone-red.png',
             ui_color='#FF0000',
-            ui_text="🎤 Recording (click to cancel)",
+            ui_text="🎤 Recording",
             tooltip_text="Recording in progress",
             pulse=True
         ),
@@ -53,47 +50,41 @@ class StatusManager:
         # (and don't collide with the blue/indigo/teal/orange statuses).
         AppStatus.RECORDING_MEETING: StatusConfig(
             tray_icon="🎧",
-            tray_icon_file='assets/microphone-red.png',
             ui_color='#D81B60',  # Crimson-pink
-            ui_text="🎧 Recording meeting (caps=send · click=end)",
+            ui_text="🎧 Meeting",
             tooltip_text="Recording meeting (mic + system audio)",
             pulse=True
         ),
         AppStatus.RECORDING_PHONE: StatusConfig(
             tray_icon="📞",
-            tray_icon_file='assets/microphone-red.png',
             ui_color='#8E24AA',  # Violet
-            ui_text="📞 Recording call (caps=send · click=end)",
+            ui_text="📞 Call",
             tooltip_text="Recording call (diarized transcript)",
             pulse=True
         ),
         AppStatus.PROCESSING: StatusConfig(
             tray_icon="⚙️",
-            tray_icon_file='assets/microphone-yellow.png',
             ui_color='#0066CC',
-            ui_text="⚙️ Processing...",
+            ui_text="⚙️ Processing…",
             tooltip_text="Processing audio...",
             pulse=True
         ),
         AppStatus.TRANSCRIBING: StatusConfig(
             tray_icon="📝",
-            tray_icon_file='assets/microphone-yellow.png',
             ui_color='#4B0082',  # Indigo
-            ui_text="📝 Transcribing audio...",
+            ui_text="📝 Transcribing…",
             tooltip_text="Transcribing speech to text",
             pulse=True
         ),
         AppStatus.CLEANING: StatusConfig(
             tray_icon="✨",
-            tray_icon_file='assets/microphone-yellow.png',
             ui_color='#008080',  # Teal
-            ui_text="✨ Cleaning transcript...",
+            ui_text="✨ Cleaning…",
             tooltip_text="Improving transcript quality",
             pulse=True
         ),
         AppStatus.ERROR: StatusConfig(
             tray_icon="⚠️",
-            tray_icon_file='assets/microphone-yellow.png',
             ui_color='#FFA500',
             ui_text="⚠️ Error",
             tooltip_text="Error occurred",

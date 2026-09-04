@@ -19,9 +19,8 @@ dependencies = [
     "openai==2.20.0",            # STT (OpenAI + OpenAI-compatible servers) and transcript cleaning
     "httpx==0.28.1",             # OpenAI STT timeouts
     "requests==2.33.0",          # ElevenLabs Scribe
-    # Tray
-    "pystray==0.19.5",
-    "Pillow==12.3.0",
+    # UI: recording overlay, tray icon, setup wizard, settings window
+    "pyside6-essentials==6.11.2",
 ]
 
 [project.urls]

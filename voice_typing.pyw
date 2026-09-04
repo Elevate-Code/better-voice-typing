@@ -30,7 +30,7 @@ from modules.tray_pin import promote_tray_icon
 from modules.ui import UIFeedback
 from modules.audio_manager import set_input_device, get_default_device_id, DeviceIdentifier, find_device_by_identifier
 from modules.status_manager import StatusManager, AppStatus, RECORDING_STATUSES
-from modules.screen_utils import set_process_dpi_awareness, hide_console_window
+from modules.screen_utils import hide_console_window
 from modules.logger import setup_logging
 from modules.single_instance import acquire_single_instance_lock, release_single_instance_lock
 
@@ -46,10 +46,8 @@ class VoiceTypingApp:
         for note in settings_startup_notes:
             self.logger.info(note)
 
-        # Windows specific tweaks (DPI awareness & hiding console)
+        # Qt handles per-monitor DPI itself; just make sure no console shows
         if os.name == 'nt':
-            if not set_process_dpi_awareness():
-                self.logger.debug("DPI awareness could not be set or is already configured.")
             hide_console_window()
 
         # Initialize attributes that will be set later by other modules
@@ -666,7 +664,7 @@ class VoiceTypingApp:
             # Self-heal: if a stale processing thread overwrote our status, reassert it
             if self.status_manager.current_status != self._active_recording_status:
                 self.status_manager.set_status(self._active_recording_status)
-            self.ui_feedback.root.after(100, lambda: self._check_recorder_status(token))
+            self.ui_feedback.after(100, lambda: self._check_recorder_status(token))
 
     def process_audio(self, stream_session=None) -> None:
         try:
@@ -924,11 +922,11 @@ class VoiceTypingApp:
     def _mode_on_notice(self, key: str) -> Tuple[str, int]:
         """(message, duration_ms) confirming a conversation mode was enabled."""
         if key == 'phone_mode':
-            return "📞 Phone mode on (diarized transcripts)", 3000
+            return "📞 Phone mode on — Caps Lock sends a chunk, click the indicator to end", 4000
         from modules.loopback_recorder import loopback_available
         available, detail = loopback_available()
         if available:
-            return f"🎧 Meeting mode on ({detail})", 3000
+            return f"🎧 Meeting mode on ({detail}) — Caps Lock sends, click to end", 4000
         # Allow enabling anyway: capture falls back to mic-only per
         # recording, and the output device may change before next use
         self.logger.warning(f"Loopback unavailable at toggle time: {detail}")
@@ -1000,7 +998,7 @@ class VoiceTypingApp:
         if time.time() - float(last) < 24 * 3600:
             return
         self.settings.set('last_update_check', time.time())
-        self.ui_feedback.root.after(15000, lambda: self.check_for_updates(startup=True))
+        self.ui_feedback.after(15000, lambda: self.check_for_updates(startup=True))
 
     def _pin_tray_icon(self, attempt: int = 0) -> None:
         """Promote the tray icon out of the Windows overflow, once per
@@ -1014,17 +1012,17 @@ class VoiceTypingApp:
         if result:
             self.settings.set('tray_pinned_exe', exe)
         elif result is False and attempt < 5:
-            self.ui_feedback.root.after(5000, lambda: self._pin_tray_icon(attempt + 1))
+            self.ui_feedback.after(5000, lambda: self._pin_tray_icon(attempt + 1))
 
     def run(self) -> None:
         # Start keyboard listener
         self.listener.start()
-        self.ui_feedback.root.after(4000, self._pin_tray_icon)
+        self.ui_feedback.after(4000, self._pin_tray_icon)
         self._schedule_startup_update_check()
 
-        # Start the UI feedback's tkinter mainloop in the main thread
+        # Qt main loop, on the main thread
         try:
-            self.ui_feedback.root.mainloop()
+            self.ui_feedback.run()
         finally:
             self.cleanup()
             sys.exit(0)
@@ -1111,6 +1109,10 @@ class VoiceTypingApp:
 
         status = "enabled" if new_timeout is not None else "disabled"
         self.logger.info(f"Silence detection {status}")
+
+    def show_main_window(self) -> None:
+        """Open (or raise) the main window. Called from the tray on the main thread."""
+        self.logger.info("Main window requested (not implemented yet)")
 
     def restart_app(self) -> None:
         """Restart the application by launching a new instance and closing the current one."""

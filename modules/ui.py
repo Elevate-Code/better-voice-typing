@@ -1,649 +1,551 @@
+"""Recording indicator overlay(s) and the Qt main loop.
+
+``UIFeedback`` owns the QApplication and one frameless, always-on-top
+indicator pill per display. Qt widgets may only be touched from the main
+thread, but this app reports from the audio callback thread, the processing
+thread, the hotkey hook thread and provider threads — so every public method
+here is thread-safe: work is run directly when already on the main thread and
+otherwise posted to it through a queued signal.
+
+The pill has a fixed width for the standard statuses (measured once from the
+widest status text plus the elapsed-time counter) so it never resizes while
+recording; only long notices (warnings, retry hints) can widen it.
+"""
+import ctypes
 import logging
-import queue
 import threading
 import time
-import tkinter as tk
-from typing import Optional, Callable, Tuple
+from typing import Callable, List, Optional
 
+from PySide6.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QMouseEvent, QPainter, QPaintEvent, QScreen
+from PySide6.QtWidgets import QApplication, QWidget
 
 from modules.paste import paste_text
 from modules.settings import Settings
 from modules.status_manager import StatusConfig
-from modules.screen_utils import get_primary_monitor_geometry, get_all_monitor_geometries, MonitorGeometry
 
 logger = logging.getLogger('voice_typing')
 
-# Tkinter is not thread-safe, but this app updates the UI from the audio
-# callback thread, the processing thread, the hotkey hook thread and the tray
-# thread. All public UIFeedback methods therefore marshal their work onto the
-# Tk main thread via a queue drained by a root.after() poller.
-# 30ms keeps status changes and the audio level bar feeling immediate (~33fps).
-UI_QUEUE_POLL_MS = 30
+VALID_POSITIONS = frozenset({
+    'top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center',
+})
+VALID_SIZES = frozenset({'normal', 'mini'})
+
+# Audio level is applied coalesced at this rate (the callback only stores it)
+LEVEL_APPLY_MS = 33
+PULSE_MS = 500
+SWEEP_MS = 33
+NOTICE_COLOR = '#FFA500'
+NOTICE_FG = '#000000'
+# The pill is sized so this fits without resizing (mode texts are shorter)
+_WIDEST_STATUS = "🎤 Recording 00:00"
+
+
+def format_recording_label(base: str, note: str, elapsed_s: int) -> str:
+    """Label text while recording: base text, optional note, elapsed time."""
+    minutes, seconds = divmod(max(0, int(elapsed_s)), 60)
+    middle = f"  {note}" if note else ""
+    return f"{base}{middle}  {minutes}:{seconds:02d}"
+
+
+def darken(color: str, factor: float = 0.72) -> str:
+    """Darker shade of a '#rrggbb' color (used for pulse and level track)."""
+    c = QColor(color)
+    if not c.isValid():
+        return '#000000'
+    return QColor(int(c.red() * factor), int(c.green() * factor), int(c.blue() * factor)).name()
+
+
+class _Bridge(QObject):
+    """Queued signal carrying callables to the main thread."""
+    invoke = Signal(object)
+
+
+class IndicatorWindow(QWidget):
+    """One rounded, translucent status pill. Pure view: all state is pushed
+    in by UIFeedback; clicks are reported through ``on_click``."""
+
+    def __init__(self, on_click: Callable[[], None]) -> None:
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
+        # Never steal focus from the window the user is dictating into
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setWindowOpacity(0.92)
+        self._on_click = on_click
+        self.text = ''
+        self.color = '#FF0000'
+        self.fg = '#FFFFFF'
+        self.level = 0.0           # 0..1 filled level bar
+        self.show_level = True
+        self.sweep: Optional[float] = None  # 0..1 phase of the indeterminate sweep
+        self.radius = 8
+        self.pad_x = 10
+        self.pad_y = 4
+        self.bar_h = 3
+        self.min_width = 0
+
+    def apply_metrics(self, font: QFont, radius: int, pad_x: int, pad_y: int, bar_h: int,
+                      min_width: int) -> None:
+        self.setFont(font)
+        self.radius, self.pad_x, self.pad_y, self.bar_h = radius, pad_x, pad_y, bar_h
+        self.min_width = min_width
+        self.refit()
+
+    def refit(self) -> None:
+        fm = QFontMetrics(self.font())
+        lines = self.text.split('\n') or ['']
+        text_w = max(fm.horizontalAdvance(line) for line in lines)
+        w = max(self.min_width, text_w + 2 * self.pad_x)
+        h = fm.height() * len(lines) + 2 * self.pad_y + (self.bar_h + 3 if self.show_level else 0)
+        self.setFixedSize(QSize(w, h))
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(self.color))
+        p.drawRoundedRect(QRectF(self.rect()), self.radius, self.radius)
+
+        fm = QFontMetrics(self.font())
+        p.setPen(QColor(self.fg))
+        lines = self.text.split('\n')
+        y = self.pad_y
+        for line in lines:
+            p.drawText(QRect(self.pad_x, y, self.width() - 2 * self.pad_x, fm.height()),
+                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
+            y += fm.height()
+
+        if self.show_level:
+            track = QRect(self.pad_x, self.height() - self.pad_y - self.bar_h,
+                          self.width() - 2 * self.pad_x, self.bar_h)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(darken(self.color)))
+            p.drawRoundedRect(QRectF(track), self.bar_h / 2, self.bar_h / 2)
+            fill = QColor(self.fg)
+            fill.setAlphaF(0.9)
+            p.setBrush(fill)
+            if self.sweep is not None:
+                seg_w = max(12, track.width() // 4)
+                span = track.width() + seg_w
+                x = track.left() - seg_w + int(span * self.sweep)
+                seg = QRect(x, track.top(), seg_w, self.bar_h).intersected(track)
+                if seg.width() > 0:
+                    p.drawRoundedRect(QRectF(seg), self.bar_h / 2, self.bar_h / 2)
+            elif self.level > 0:
+                filled = QRect(track.left(), track.top(),
+                               int(track.width() * min(1.0, max(0.0, self.level))), self.bar_h)
+                p.drawRoundedRect(QRectF(filled), self.bar_h / 2, self.bar_h / 2)
+        p.end()
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_click()
+
+    def assert_topmost(self) -> None:
+        """Re-issue SetWindowPos(HWND_TOPMOST): Windows quietly demotes
+        topmost windows (another topmost window raised over it, fullscreen
+        apps, UAC prompts, display changes) and Qt only sets the flag once."""
+        if not self.isVisible():
+            return
+        try:
+            hwnd = int(self.winId())
+            HWND_TOPMOST = -1
+            SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+            ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                              SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE)
+        except Exception:
+            pass
+
 
 class UIFeedback:
     def __init__(self, position: str = 'top-right', size: str = 'normal', all_displays: bool = False):
-        # Store desired position; fallback to default if invalid
-        valid_positions = {'top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center'}
-        self.position = position if position in valid_positions else 'top-right'
+        self.app = QApplication.instance() or QApplication([])
+        self.app.setQuitOnLastWindowClosed(False)
+        self._main_thread = threading.current_thread()
+        self._bridge = _Bridge()
+        self._bridge.invoke.connect(self._run_marshalled, Qt.ConnectionType.QueuedConnection)
 
-        # Store desired size; fallback to default if invalid
-        valid_sizes = {'normal', 'mini'}
-        self.size = size if size in valid_sizes else 'normal'
-
-        # Store all_displays setting
+        self.position = position if position in VALID_POSITIONS else 'top-right'
+        self.size = size if size in VALID_SIZES else 'normal'
         self.all_displays = all_displays
 
-        # Configure dimensions based on size
-        self._configure_size_attributes()
-
-        # Create the root window
-        self.root = tk.Tk()
-        self.root.withdraw()
-
-        # Lists to hold all indicator windows and their components
-        self.indicators: list[tk.Toplevel] = []
-        self.frames: list[tk.Frame] = []
-        self.labels: list[tk.Label] = []
-        self.level_canvases: list[tk.Canvas] = []
-        self.level_bars: list[int] = []  # Canvas item IDs
-
-        # Create indicator window(s) based on all_displays setting
-        self._create_all_windows()
-
-        # Add pulsing state variables
-        self.pulsing = False
-        self.RECORDING_COLORS = ['red', 'darkred']
-        self.pulse_colors = self.RECORDING_COLORS
-        self.current_color = 0
-
-        # Add click callback placeholder
-        self.on_click_callback = None
-
-        # Add retry callback placeholder
+        self.indicators: List[IndicatorWindow] = []
+        self.on_click_callback: Optional[Callable[[], None]] = None
         self.on_retry_callback: Optional[Callable[[], None]] = None
         self.retry_available = False
 
-        # Position windows initially
-        self._position_window()
-
-        # Add warning state variables
-        self.warning_color = '#FFA500'  # Orange warning color
-        self.warning_timer: Optional[str] = None
-
-        # Update label text color to be more visible on warning background
-        for label in self.labels:
-            label.configure(fg='black')  # Will be dynamically changed based on state
-
-        # Cross-thread marshalling (must be created on the main thread)
-        self._main_thread = threading.current_thread()
-        self._ui_queue: "queue.Queue[Callable[[], None]]" = queue.Queue()
-        self._pending_level: Optional[float] = None  # Latest audio level, applied coalesced by the poller
-        self._pulse_after_id: Optional[str] = None
-        self._snap_after_id: Optional[str] = None
-        self._snap_passes = 0
-        self._timer_after_id: Optional[str] = None
+        # Live status (what the pill shows when no notice overrides it)
+        self._status: Optional[StatusConfig] = None
+        self._status_text = ''
+        self._visible = False
+        self.pulsing = False
+        self._pulse_phase = 0
+        self._sweep_phase = 0.0
+        self._pending_level: Optional[float] = None
         self._recording_started: Optional[float] = None
-        self._recording_base_text: str = ''
-        self._recording_note: str = ''
-        self.root.after(UI_QUEUE_POLL_MS, self._process_ui_queue)
+        self._recording_note = ''
+        self._notice_active = False
 
-    def _process_ui_queue(self) -> None:
-        """Drain marshalled UI work and apply the latest audio level. Runs on the main thread."""
+        self._level_timer = QTimer()
+        self._level_timer.setInterval(LEVEL_APPLY_MS)
+        self._level_timer.timeout.connect(self._apply_level)
+        self._pulse_timer = QTimer()
+        self._pulse_timer.setInterval(PULSE_MS)
+        self._pulse_timer.timeout.connect(self._pulse)
+        self._sweep_timer = QTimer()
+        self._sweep_timer.setInterval(SWEEP_MS)
+        self._sweep_timer.timeout.connect(self._sweep)
+        self._tick_timer = QTimer()
+        self._tick_timer.setInterval(1000)
+        self._tick_timer.timeout.connect(self._refresh_recording_label)
+        self._notice_timer = QTimer()
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(self._end_notice)
+
+        self._create_all_windows()
+        self.app.screenAdded.connect(lambda _s: self._screens_changed())
+        self.app.screenRemoved.connect(lambda _s: self._screens_changed())
+
+    # ---- threading -------------------------------------------------------
+
+    def _run_marshalled(self, fn: Callable[[], None]) -> None:
         try:
-            while True:
-                fn = self._ui_queue.get_nowait()
-                try:
-                    fn()
-                except tk.TclError:
-                    pass
-                except Exception:
-                    logger.exception("Error running marshalled UI task")
-        except queue.Empty:
-            pass
-
-        level = self._pending_level
-        if level is not None:
-            self._pending_level = None
-            if self.pulsing:
-                try:
-                    for level_canvas, level_bar in zip(self.level_canvases, self.level_bars):
-                        width = level_canvas.winfo_width()
-                        bar_width = int(width * min(1.0, max(0.0, level)))
-                        level_canvas.coords(level_bar, 0, 0, bar_width, self.level_height)
-                except tk.TclError:
-                    pass
-
-        self.root.after(UI_QUEUE_POLL_MS, self._process_ui_queue)
+            fn()
+        except Exception:
+            logger.exception("Error running marshalled UI task")
 
     def _call_on_ui_thread(self, fn: Callable[[], None]) -> None:
-        """Run fn now if on the main thread, otherwise queue it for the poller."""
+        """Run fn now if on the main thread, otherwise post it there."""
         if threading.current_thread() is self._main_thread:
-            fn()
+            self._run_marshalled(fn)
         else:
-            self._ui_queue.put(fn)
+            self._bridge.invoke.emit(fn)
 
     def call_on_main(self, fn: Callable[[], None]) -> None:
-        """Public: schedule fn to run on the Tk main thread (always queued)."""
-        self._ui_queue.put(fn)
+        """Public: run fn on the main thread (always posted, never inline)."""
+        self._bridge.invoke.emit(fn)
 
-    def _create_indicator_window(self) -> Tuple[tk.Toplevel, tk.Frame, tk.Label, tk.Canvas, int]:
-        """Creates a single indicator window with all its components."""
-        indicator = tk.Toplevel(self.root)
-        indicator.withdraw()
+    def after(self, delay_ms: int, fn: Callable[[], None]) -> None:
+        """Run fn on the main thread after delay_ms. Thread-safe."""
+        self._call_on_ui_thread(lambda: QTimer.singleShot(int(delay_ms), fn))
 
-        # Configure the indicator window
-        indicator.overrideredirect(True)  # Remove window decorations
-        indicator.attributes('-topmost', True)  # Keep on top
-        indicator.attributes('-alpha', 0.85)  # Make window semi-transparent
-        indicator.configure(bg='red')
+    def run(self) -> None:
+        """Enter the Qt main loop (blocks until quit)."""
+        self.app.exec()
 
-        # Create main frame
-        frame = tk.Frame(indicator, bg='red', borderwidth=0, highlightthickness=0)
-        frame.pack(fill='both', padx=self.frame_padding, pady=self.frame_padding)
+    def cleanup(self) -> None:
+        self._call_on_ui_thread(self._cleanup_impl)
 
-        # Create label with click binding
-        font_config = ('TkDefaultFont', self.font_size) if self.font_size else None
-        label = tk.Label(frame, text=self.label_text,
-                        fg='white', bg='red', padx=self.label_padx, pady=self.label_pady,
-                        cursor="hand2", font=font_config)
-        label.pack()
+    def _cleanup_impl(self) -> None:
+        for t in (self._level_timer, self._pulse_timer, self._sweep_timer,
+                  self._tick_timer, self._notice_timer):
+            t.stop()
+        for w in self.indicators:
+            w.hide()
+        self.app.quit()
 
-        # Create audio level indicator
-        level_canvas = tk.Canvas(frame, width=1, height=self.level_height, bg='darkred',
-                                highlightthickness=0, borderwidth=0)
-        level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
-        level_bar = level_canvas.create_rectangle(0, 0, 0, self.level_height,
-                                                  fill='white', width=0)
+    # ---- windows ---------------------------------------------------------
 
-        # Bind click events
-        label.bind('<Button-1>', self._handle_click)
-        indicator.bind('<Button-1>', self._handle_click)
-        level_canvas.bind('<Button-1>', self._handle_click)
+    def _metrics(self) -> dict:
+        if self.size == 'mini':
+            font = QFont('Segoe UI', 9)
+            return dict(font=font, radius=6, pad_x=7, pad_y=2, bar_h=2)
+        font = QFont('Segoe UI', 10)
+        return dict(font=font, radius=8, pad_x=10, pad_y=4, bar_h=3)
 
-        return indicator, frame, label, level_canvas, level_bar
+    def _apply_metrics(self, w: IndicatorWindow) -> None:
+        m = self._metrics()
+        min_width = QFontMetrics(m['font']).horizontalAdvance(_WIDEST_STATUS) + 2 * m['pad_x']
+        w.apply_metrics(m['font'], m['radius'], m['pad_x'], m['pad_y'], m['bar_h'], min_width)
+
+    def _target_screens(self) -> List[QScreen]:
+        screens = self.app.screens()
+        if self.all_displays and screens:
+            return list(screens)
+        primary = self.app.primaryScreen()
+        return [primary] if primary else screens[:1]
 
     def _create_all_windows(self) -> None:
-        """Creates all indicator windows based on all_displays setting."""
-        # Clear existing windows
-        for indicator in self.indicators:
-            indicator.destroy()
-        self.indicators.clear()
-        self.frames.clear()
-        self.labels.clear()
-        self.level_canvases.clear()
-        self.level_bars.clear()
+        for w in self.indicators:
+            w.hide()
+            w.deleteLater()
+        self.indicators = []
+        for _ in self._target_screens():
+            w = IndicatorWindow(self._handle_click)
+            self._apply_metrics(w)
+            self.indicators.append(w)
+        self._paint_all()
+        self._position_windows()
 
-        if self.all_displays:
-            monitors = get_all_monitor_geometries()
-            # Create one window per monitor (at least one if enumeration fails)
-            num_windows = max(1, len(monitors))
-        else:
-            num_windows = 1
+    def _screens_changed(self) -> None:
+        was_visible = self._visible
+        self._create_all_windows()
+        if was_visible:
+            self._show_all()
 
-        for _ in range(num_windows):
-            indicator, frame, label, level_canvas, level_bar = self._create_indicator_window()
-            self.indicators.append(indicator)
-            self.frames.append(frame)
-            self.labels.append(label)
-            self.level_canvases.append(level_canvas)
-            self.level_bars.append(level_bar)
+    def _position_windows(self) -> None:
+        margin = 12
+        for w, screen in zip(self.indicators, self._target_screens()):
+            area = screen.availableGeometry()  # excludes the taskbar
+            size = w.size()
+            if 'right' in self.position:
+                x = area.right() - size.width() - margin
+            elif 'left' in self.position:
+                x = area.left() + margin
+            else:
+                x = area.left() + (area.width() - size.width()) // 2
+            if 'bottom' in self.position:
+                y = area.bottom() - size.height() - margin
+            else:
+                y = area.top() + margin
+            w.move(QPoint(x, y))
 
-    def _configure_size_attributes(self) -> None:
-        """Sets UI dimension attributes based on self.size."""
-        if self.size == 'mini':
-            self.label_padx = 5
-            self.label_pady = 3
-            self.level_height = 3
-            self.level_padx = 2
-            self.level_pady = (0, 2)
-            self.font_size = 9
-            self.frame_padding = 0
-            self.label_text = "🎤 Recording"
-        else:  # normal
-            self.label_padx = 10
-            self.label_pady = 5
-            self.level_height = 4
-            self.level_padx = 4
-            self.level_pady = (0, 4)
-            self.font_size = None
-            self.frame_padding = 0
-            self.label_text = "🎤 Recording (click to cancel)"
+    def _show_all(self) -> None:
+        self._visible = True
+        self._position_windows()
+        for w in self.indicators:
+            if not w.isVisible():
+                w.show()
+            w.assert_topmost()
 
-    def _show_on_top(self) -> None:
-        """Show all indicator windows and ensure they stay on top."""
-        for indicator in self.indicators:
-            indicator.deiconify()
-            self._assert_topmost(indicator)
+    def _hide_all(self) -> None:
+        self._visible = False
+        for w in self.indicators:
+            w.hide()
 
-    @staticmethod
-    def _assert_topmost(indicator: tk.Toplevel) -> None:
-        """Force the window back into the topmost band.
+    def _paint_all(self) -> None:
+        """Push the current model (status or notice) into every window."""
+        for w in self.indicators:
+            if self._notice_active:
+                pass  # notice painted by _show_notice
+            elif self._status is not None:
+                w.color = self._pulse_color()
+                w.fg = self._status.ui_fg_color
+                w.text = self._status_text
+                w.show_level = True
+                w.sweep = self._sweep_phase if self._is_sweeping() else None
+            w.refit()
+        self._position_windows()
 
-        Tk skips the Win32 call when it believes '-topmost' is already set,
-        but Windows can quietly demote the window (another topmost window
-        raised over it, a fullscreen app, a UAC prompt, display changes).
-        Toggling off and on makes Tk re-issue SetWindowPos(HWND_TOPMOST)."""
-        try:
-            indicator.attributes('-topmost', False)
-            indicator.attributes('-topmost', True)
-            indicator.lift()
-        except tk.TclError:
-            pass
+    def _is_sweeping(self) -> bool:
+        return (self._status is not None and self._status.pulse
+                and self._recording_started is None)
 
-    def _position_single_window(self, indicator: tk.Toplevel, monitor_geometry: Optional[MonitorGeometry]) -> None:
-        """Positions a single indicator window on the given monitor."""
-        indicator.update_idletasks()
-        win_w = indicator.winfo_width()
-        win_h = indicator.winfo_height()
+    def _pulse_color(self) -> str:
+        if self._status is None:
+            return '#FF0000'
+        if self.pulsing and self._pulse_phase:
+            return darken(self._status.ui_color, 0.8)
+        return self._status.ui_color
 
-        # Default coordinates if monitor info fails
-        if monitor_geometry:
-            mon_x = monitor_geometry.left
-            mon_y = monitor_geometry.top
-            mon_w = monitor_geometry.width
-            mon_h = monitor_geometry.height
-        else:
-            mon_x = 0
-            mon_y = 0
-            mon_w = self.root.winfo_screenwidth()
-            mon_h = self.root.winfo_screenheight()
+    # ---- public settings --------------------------------------------------
 
-        margin = 15
-        taskbar_offset = 40  # Offset to clear the Windows taskbar
-
-        # Compute x
-        if 'right' in self.position:
-            pos_x = mon_x + mon_w - win_w - margin
-        elif 'left' in self.position:
-            pos_x = mon_x + margin
-        else:  # center
-            pos_x = mon_x + (mon_w - win_w) // 2
-
-        # Compute y
-        if 'bottom' in self.position:
-            pos_y = mon_y + mon_h - win_h - margin - taskbar_offset
-        else:  # top
-            pos_y = mon_y + margin
-
-        indicator.geometry(f'+{pos_x}+{pos_y}')
-
-    def _position_window(self) -> None:
-        """Positions all indicator windows based on the configured corner."""
-        if self.all_displays:
-            monitors = get_all_monitor_geometries()
-            # Check if monitor count changed
-            if len(monitors) != len(self.indicators):
-                self._create_all_windows()
-            # Position each window on its respective monitor
-            for i, indicator in enumerate(self.indicators):
-                monitor = monitors[i] if i < len(monitors) else None
-                self._position_single_window(indicator, monitor)
-        else:
-            # Single display mode - use primary monitor
-            monitor_geometry = get_primary_monitor_geometry()
-            self._position_single_window(self.indicators[0], monitor_geometry)
-
-    # Public method to allow position change at runtime
     def set_position(self, position: str) -> None:
-        """Update the indicator corner position and reposition it immediately. Thread-safe."""
-        valid_positions = {'top-right', 'top-left', 'bottom-right', 'bottom-left', 'top-center', 'bottom-center'}
-        if position in valid_positions:
+        if position in VALID_POSITIONS:
             self.position = position
-            self._call_on_ui_thread(self._position_window)
+            self._call_on_ui_thread(self._position_windows)
 
     def set_size(self, size: str) -> None:
-        """Update the indicator size and reconfigure UI elements. Thread-safe."""
-        self._call_on_ui_thread(lambda: self._set_size_impl(size))
-
-    def _set_size_impl(self, size: str) -> None:
-        valid_sizes = {'normal', 'mini'}
-        if size in valid_sizes and self.size != size:
-            self.size = size
-
-            # Reconfigure dimensions based on new size
-            self._configure_size_attributes()
-
-            # Update UI elements with new dimensions on all windows
-            font_config = ('TkDefaultFont', self.font_size) if self.font_size else None
-            for i, (frame, label, level_canvas) in enumerate(zip(self.frames, self.labels, self.level_canvases)):
-                label.configure(padx=self.label_padx, pady=self.label_pady, font=font_config)
-                frame.configure(padx=self.frame_padding, pady=self.frame_padding)
-                level_canvas.configure(height=self.level_height)
-                level_canvas.pack_configure(padx=self.level_padx, pady=self.level_pady)
-
-                # Update label text based on current status (any recording mode;
-                # the elapsed-time ticker restores mode-specific text within 1s)
-                current_text = label.cget('text')
-                if 'Recording' in current_text:
-                    label.configure(text=self.label_text)
-
-            # Reposition windows with new size
-            self._position_window()
+        def impl() -> None:
+            if size in VALID_SIZES and size != self.size:
+                self.size = size
+                for w in self.indicators:
+                    self._apply_metrics(w)
+                self._paint_all()
+        self._call_on_ui_thread(impl)
 
     def set_all_displays(self, enabled: bool) -> None:
-        """Enable or disable showing indicator on all displays. Thread-safe."""
         def impl() -> None:
             if self.all_displays != enabled:
                 self.all_displays = enabled
-                self._create_all_windows()
-                self._position_window()
+                self._screens_changed()
         self._call_on_ui_thread(impl)
 
-    def update_audio_level(self, level: float) -> None:
-        """Update the audio level indicator (level should be between 0.0 and 1.0).
-        Thread-safe: called from the audio callback thread; only stores the value.
-        The UI queue poller applies the latest level (coalesced to ~20fps)."""
-        self._pending_level = level
+    def set_click_callback(self, callback: Callable[[], None]) -> None:
+        self.on_click_callback = callback
 
-    def _pulse(self) -> None:
-        # At most one pulse chain exists: _pulse_after_id is set iff a tick is pending
-        self._pulse_after_id = None
-        if not self.pulsing:
-            return
-        self.current_color = (self.current_color + 1) % 2
-        color = self.pulse_colors[self.current_color]
-        try:
-            for indicator, frame, label in zip(self.indicators, self.frames, self.labels):
-                indicator.configure(bg=color)
-                frame.configure(bg=color)
-                label.configure(bg=color)
-                # While anything is in progress, keep re-asserting topmost:
-                # the indicator sporadically ended up behind other windows
-                self._assert_topmost(indicator)
-        except tk.TclError:
-            return
-        self._pulse_after_id = self.root.after(500, self._pulse)  # Pulse every 500ms
+    def set_retry_callback(self, callback: Callable[[], None]) -> None:
+        self.on_retry_callback = callback
 
-    def _start_pulse(self) -> None:
-        """Mark pulsing active and start the pulse chain if one isn't already running."""
-        self.pulsing = True
-        if self._pulse_after_id is None:
-            self._pulse()
-
-    def start_listening_animation(self) -> None:
-        """Start the recording animation on all windows"""
-        # Cancel any existing warning state
-        if self.warning_timer:
-            self.root.after_cancel(self.warning_timer)
-            self.warning_timer = None
-
-        self.pulse_colors = self.RECORDING_COLORS
-        for label, level_canvas in zip(self.labels, self.level_canvases):
-            label.configure(
-                text=self.label_text,
-                fg='white'
-            )
-            level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
-        self._position_window()
-        self._show_on_top()
-        self._start_pulse()
-        self._schedule_snap()
-
-    def stop_listening_animation(self) -> None:
-        """Stop the recording animation on all windows"""
-        self.pulsing = False
-        # Only hide if no warning is active
-        if not self.warning_timer:
-            for indicator in self.indicators:
-                indicator.withdraw()
-        # Reset colors to recording state
-        self.current_color = 0
-        for indicator, frame, label, level_canvas, level_bar in zip(
-            self.indicators, self.frames, self.labels, self.level_canvases, self.level_bars
-        ):
-            indicator.configure(bg=self.RECORDING_COLORS[0])
-            frame.configure(bg=self.RECORDING_COLORS[0])
-            label.configure(bg=self.RECORDING_COLORS[0])
-            # Reset audio level
-            level_canvas.coords(level_bar, 0, 0, 0, self.level_height)
-
-    def _handle_click(self, event: tk.Event) -> None:
+    def _handle_click(self) -> None:
         if self.retry_available and self.on_retry_callback:
             self.retry_available = False
             self.on_retry_callback()
         elif self.on_click_callback:
             self.on_click_callback()
 
-    def set_click_callback(self, callback: Callable[[], None]) -> None:
-        """Set the function to be called when the indicator is clicked"""
-        self.on_click_callback = callback
+    # ---- audio level / animation -----------------------------------------
 
-    def set_retry_callback(self, callback: Callable[[], None]) -> None:
-        """Set the function to be called when retry is clicked"""
-        self.on_retry_callback = callback
+    def update_audio_level(self, level: float) -> None:
+        """Thread-safe: called from the audio callback; only stores the value."""
+        self._pending_level = level
+
+    def _apply_level(self) -> None:
+        level = self._pending_level
+        if level is None or not self.pulsing or self._notice_active:
+            return
+        self._pending_level = None
+        for w in self.indicators:
+            w.level = level
+            w.update()
+
+    def _pulse(self) -> None:
+        if not self.pulsing:
+            return
+        self._pulse_phase ^= 1
+        color = self._pulse_color()
+        for w in self.indicators:
+            if not self._notice_active:
+                w.color = color
+                w.update()
+            # While anything is in progress keep re-asserting topmost: the
+            # indicator sporadically ended up behind other windows
+            w.assert_topmost()
+
+    def _sweep(self) -> None:
+        if not self._is_sweeping() or self._notice_active:
+            return
+        self._sweep_phase = (self._sweep_phase + 0.02) % 1.0
+        for w in self.indicators:
+            w.sweep = self._sweep_phase
+            w.update()
+
+    def _start_animation(self) -> None:
+        self.pulsing = True
+        if not self._pulse_timer.isActive():
+            self._pulse_timer.start()
+        if not self._level_timer.isActive():
+            self._level_timer.start()
+        if self._is_sweeping():
+            if not self._sweep_timer.isActive():
+                self._sweep_timer.start()
+        else:
+            self._sweep_timer.stop()
+
+    def _stop_animation(self) -> None:
+        self.pulsing = False
+        self._pulse_phase = 0
+        self._pulse_timer.stop()
+        self._level_timer.stop()
+        self._sweep_timer.stop()
+        for w in self.indicators:
+            w.level = 0.0
+            w.sweep = None
+
+    # ---- status ------------------------------------------------------------
+
+    def update_status(self, config: StatusConfig, error_message: Optional[str] = None) -> None:
+        """Thread-safe."""
+        self._call_on_ui_thread(lambda: self._update_status_impl(config, error_message))
+
+    def _update_status_impl(self, config: StatusConfig, error_message: Optional[str]) -> None:
+        self._status = config
+        self._status_text = error_message or config.ui_text
+        if config.pulse:
+            recording = "Recording" in config.ui_text or config.ui_text.startswith(("🎤", "🎧", "📞"))
+            if recording:
+                if self._recording_started is None:
+                    self._recording_started = time.monotonic()
+                    self._recording_note = ''
+                    self._tick_timer.start()
+                self._status_text = format_recording_label(
+                    config.ui_text, self._recording_note,
+                    int(time.monotonic() - self._recording_started))
+            else:
+                self._recording_started = None
+                self._tick_timer.stop()
+            if self._notice_active:
+                # A notice fired around a status change: drop it, the live
+                # status is what the user needs to see now
+                self._notice_timer.stop()
+                self._notice_active = False
+                self.retry_available = False
+            self._start_animation()
+            self._paint_all()
+            self._show_all()
+        else:
+            self._recording_started = None
+            self._tick_timer.stop()
+            self._stop_animation()
+            if error_message:
+                self._paint_all()
+                self._show_all()
+                self._notice_timer.start(5000)
+            elif not self._notice_active:
+                self._hide_all()
+
+    def _refresh_recording_label(self) -> None:
+        if self._recording_started is None or self._status is None:
+            self._tick_timer.stop()
+            return
+        self._status_text = format_recording_label(
+            self._status.ui_text, self._recording_note,
+            int(time.monotonic() - self._recording_started))
+        if not self._notice_active:
+            for w in self.indicators:
+                w.text = self._status_text
+                w.update()
 
     def set_recording_note(self, note: str) -> None:
-        """Short status note appended to the recording label (e.g. queued-chunk
-        count or a chunk failure during a conversation session); pass '' to
-        clear. Thread-safe; the label refreshes immediately. The warning
-        overlay can't be used here: while recording, the pulse animation and
-        the elapsed-time ticker would overwrite it."""
+        """Short note appended to the recording label (queued-chunk count, a
+        chunk failure during a session); '' clears. Thread-safe. Warnings
+        can't be used mid-recording: the ticker would repaint over them."""
         def impl() -> None:
             self._recording_note = note
             self._refresh_recording_label()
+            for w in self.indicators:
+                w.refit()
+            self._position_windows()
         self._call_on_ui_thread(impl)
 
+    # ---- notices -----------------------------------------------------------
+
+    def show_warning(self, message: str, duration_ms: int = 5000) -> None:
+        """Orange notice on every indicator for duration_ms. Thread-safe."""
+        self._call_on_ui_thread(lambda: self._show_notice(message, duration_ms, retry=False))
+
+    def show_error_with_retry(self, message: str, duration_ms: int = 7000) -> None:
+        """Notice whose click retries the last recording until dismissed. Thread-safe."""
+        self._call_on_ui_thread(lambda: self._show_notice(message, duration_ms, retry=True))
+
+    def _show_notice(self, message: str, duration_ms: int, retry: bool) -> None:
+        self._notice_timer.stop()
+        self._notice_active = True
+        self.retry_available = retry
+        text = f"{message}\n🔄 Click to retry" if retry else message
+        for w in self.indicators:
+            w.color = NOTICE_COLOR
+            w.fg = NOTICE_FG
+            w.text = text
+            w.show_level = False
+            w.sweep = None
+            w.refit()
+        self._show_all()
+        self._notice_timer.start(int(duration_ms))
+
+    def _end_notice(self) -> None:
+        self._notice_active = False
+        self.retry_available = False
+        if self.pulsing:
+            # A live status (recording/processing) continues underneath
+            self._paint_all()
+            return
+        self._hide_all()
+        self._paint_all()
+
+    # ---- text delivery ------------------------------------------------------
+
     def insert_text(self, text: str) -> None:
-        """Paste text at the cursor. Thread-safe: runs on the Tk main thread
-        (the clipboard restore is scheduled via root.after)."""
+        """Paste text at the cursor. Thread-safe (the clipboard restore is
+        scheduled on the main thread)."""
         self._call_on_ui_thread(lambda: self._insert_text_impl(text))
 
     def _insert_text_impl(self, text: str) -> None:
         try:
-            paste_text(text, Settings().get('clipboard_restore_delay_ms'), self.root.after)
+            paste_text(text, Settings().get('clipboard_restore_delay_ms'), self.after)
         except Exception as e:
             logger.error(f"UIFeedback: Error during text insertion: {e}", exc_info=True)
-
-    def show_warning(self, message: str, duration_ms: int = 5000) -> None:
-        """Show a warning message in all indicators for a specified duration. Thread-safe."""
-        self._call_on_ui_thread(lambda: self._show_warning_impl(message, duration_ms))
-
-    def _show_warning_impl(self, message: str, duration_ms: int) -> None:
-        self._show_notice(message, duration_ms, retry=False)
-
-    def show_error_with_retry(self, message: str, duration_ms: int = 7000) -> None:
-        """Show error message with retry option on all windows. Thread-safe."""
-        self._call_on_ui_thread(lambda: self._show_notice(message, duration_ms, retry=True))
-
-    def _show_notice(self, message: str, duration_ms: int, retry: bool) -> None:
-        """Paint an orange notice on every indicator and auto-dismiss it.
-
-        With retry=True a click on the indicator retries the last recording
-        until the notice is dismissed. Must run on the Tk thread."""
-        if self.warning_timer:
-            self.root.after_cancel(self.warning_timer)
-        self.retry_available = retry
-        text = f"{message}\n🔄 Click to retry" if retry else message
-
-        self._show_on_top()
-        for indicator, frame, label, level_canvas in zip(
-            self.indicators, self.frames, self.labels, self.level_canvases
-        ):
-            indicator.configure(bg=self.warning_color)
-            frame.configure(bg=self.warning_color)
-            label.configure(bg=self.warning_color, fg='black', text=text)
-            # Hide the level indicator during the notice
-            level_canvas.pack_forget()
-
-        self._position_window()
-        self._schedule_snap()
-        self.warning_timer = self.root.after(duration_ms, self._reset_and_hide)
-
-    def _reset_and_hide(self) -> None:
-        """Reset UI state and hide all indicators"""
-        self.warning_timer = None
-        self.retry_available = False
-        if self.pulsing:
-            # A pulsing status (recording/processing) is live — e.g. a warning
-            # fired around a recording start. Restore the level bar but keep
-            # the windows visible; the pulse chain and elapsed-time ticker
-            # repaint colors and text within a second.
-            for level_canvas in self.level_canvases:
-                level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
-            return
-        for indicator, frame, label, level_canvas in zip(
-            self.indicators, self.frames, self.labels, self.level_canvases
-        ):
-            level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)  # Restore level indicator
-            indicator.withdraw()
-            # Reset to recording state colors
-            indicator.configure(bg=self.RECORDING_COLORS[0])
-            frame.configure(bg=self.RECORDING_COLORS[0])
-            label.configure(
-                bg=self.RECORDING_COLORS[0],
-                fg='white'  # Reset to white text for recording state
-            )
-
-    def update_status(self, config: StatusConfig, error_message: Optional[str] = None) -> None:
-        """Update UI appearance based on status configuration on all windows. Thread-safe."""
-        self._call_on_ui_thread(lambda: self._update_status_impl(config, error_message))
-
-    def _update_status_impl(self, config: StatusConfig, error_message: Optional[str] = None) -> None:
-        # Update colors and text
-        text = error_message if error_message else config.ui_text
-
-        # Shorten recording status text in mini mode (all recording modes)
-        if self.size == 'mini':
-            text = text.replace(" (click to cancel)", "")
-            text = text.replace(" (caps=send · click=end)", "")
-
-        for indicator, frame, label in zip(self.indicators, self.frames, self.labels):
-            indicator.configure(bg=config.ui_color)
-            frame.configure(bg=config.ui_color)
-            label.configure(
-                bg=config.ui_color,
-                fg=config.ui_fg_color,
-                text=text
-            )
-
-        # Handle visibility and animation
-        if config.pulse:
-            if self.warning_timer:
-                self.root.after_cancel(self.warning_timer)
-                self.warning_timer = None
-                # The dismissed warning had hidden the level bars; restore them
-                for level_canvas in self.level_canvases:
-                    level_canvas.pack(fill='x', padx=self.level_padx, pady=self.level_pady)
-            self.retry_available = False
-            self.pulse_colors = [config.ui_color, self._darken_color(config.ui_color)]
-            # Tint the level bar background to match the status color
-            for level_canvas in self.level_canvases:
-                level_canvas.configure(bg=self._darken_color(config.ui_color))
-            self._show_on_top()
-            self._start_pulse()
-            self._schedule_snap()
-
-            # Elapsed-time display while recording (any recording mode)
-            if "Recording" in config.ui_text:
-                self._recording_base_text = text
-                if self._recording_started is None:
-                    self._recording_started = time.monotonic()
-                    self._recording_note = ''
-                    self._start_recording_timer()
-            else:
-                self._recording_started = None
-        else:
-            self.pulsing = False
-            self._recording_started = None
-            if error_message:
-                self._show_on_top()
-                # Auto-hide after 5 seconds for errors
-                if self.warning_timer:
-                    self.root.after_cancel(self.warning_timer)
-                self.warning_timer = self.root.after(5000, self._reset_and_hide)
-            else:
-                for indicator in self.indicators:
-                    indicator.withdraw()
-
-    def _start_recording_timer(self) -> None:
-        """Start the once-per-second elapsed-time label update, if not already running."""
-        if self._timer_after_id is None:
-            self._timer_after_id = self.root.after(1000, self._tick_recording_timer)
-
-    def _tick_recording_timer(self) -> None:
-        self._timer_after_id = None
-        if not self._refresh_recording_label():
-            return
-        self._timer_after_id = self.root.after(1000, self._tick_recording_timer)
-
-    def _refresh_recording_label(self) -> bool:
-        """Repaint the recording label (base text + note + elapsed time).
-        Runs on the Tk thread; returns False when no recording is live."""
-        if self._recording_started is None or not self.pulsing:
-            return False
-        elapsed = int(time.monotonic() - self._recording_started)
-        minutes, seconds = divmod(elapsed, 60)
-        note = f"  {self._recording_note}" if self._recording_note else ""
-        try:
-            for label in self.labels:
-                label.configure(text=f"{self._recording_base_text}{note}  {minutes}:{seconds:02d}")
-        except tk.TclError:
-            return False
-        # Text width changes as the text advances; re-fit the window once
-        self._schedule_snap(passes=1)
-        return True
-
-    def _darken_color(self, color: str) -> str:
-        """Create a darker version of the given color for pulsing effect"""
-        try:
-            # Handle invalid or empty color values
-            if not color or len(color) != 7 or not color.startswith('#'):
-                return '#000000'  # Default to black if invalid color
-
-            # Convert hex to RGB, darken, convert back to hex
-            r = int(color[1:3], 16)
-            g = int(color[3:5], 16)
-            b = int(color[5:7], 16)
-
-            factor = 0.7  # Darken by 30%
-            r = int(r * factor)
-            g = int(g * factor)
-            b = int(b * factor)
-
-            return f'#{r:02x}{g:02x}{b:02x}'
-        except ValueError:
-            logger.warning(f"Invalid color format: {color}")
-            return '#000000'  # Fallback color
-
-    def cleanup(self) -> None:
-        """Ensure proper cleanup of UI resources for all windows"""
-        if self.warning_timer:
-            self.root.after_cancel(self.warning_timer)
-        self.pulsing = False
-        for indicator in self.indicators:
-            indicator.withdraw()
-        self.root.quit()
-
-    def _schedule_snap(self, passes: int = 2) -> None:
-        """Snap windows to their content now-ish, plus follow-up passes to catch
-        layout that settles late. Event-driven (called when content changes)
-        rather than a continuous loop: constantly re-measuring and re-setting
-        geometry on visible windows caused perceptible UI stutter."""
-        self._snap_passes = max(self._snap_passes, passes)
-        if self._snap_after_id is None:
-            self._snap_after_id = self.root.after(10, self._snap_to_content)
-
-    def _snap_to_content(self) -> None:
-        """
-        Adjusts all window sizes to fit their content.
-        Forces windows to "shrink-wrap" their contents by measuring the
-        required space and resizing windows to match. This prevents "mysterious margins".
-        """
-        self._snap_after_id = None
-        self._snap_passes = max(0, self._snap_passes - 1)
-        try:
-            for indicator in self.indicators:
-                indicator.update_idletasks()
-                w = indicator.winfo_reqwidth()
-                h = indicator.winfo_reqheight()
-                indicator.geometry(f"{w}x{h}")
-
-            # Reposition after resizing to ensure correct placement
-            self._position_window()
-
-            # Follow-up pass, if any remain
-            if self._snap_passes > 0:
-                self._snap_after_id = self.root.after(100, self._snap_to_content)
-        except tk.TclError:
-            # This can happen if the window is destroyed while the after() call is pending
-            pass
