@@ -8,6 +8,8 @@ import sounddevice as sd
 import soundfile as sf
 
 from modules.audio_manager import get_capture_device_id
+from modules import audio_level
+from modules.audio_level import LiveLevelTracker
 from modules.settings import Settings
 
 logger = logging.getLogger('voice_typing')
@@ -24,6 +26,15 @@ settings = Settings()
 # Minimum duration in seconds for valid recordings
 MIN_DURATION = 1.0
 
+# Marks an analyze_recording failure that means "could not read this file",
+# as opposed to "this file holds no signal". Callers must keep the audio in
+# the first case — deleting a recording we failed to even open loses the
+# user's words to what may be a transient error.
+ANALYSIS_ERROR_PREFIX = "Error analyzing audio: "
+
+# Frames per block when analyzing a file (~15 s of audio per block).
+ANALYSIS_FRAMES_PER_BLOCK = 512
+
 # WAV comment written into phone-mode recordings so the transcription pipeline
 # can recognize them later (survives snapshots, retries, and app restarts —
 # the mono audio itself is indistinguishable from normal dictation).
@@ -33,9 +44,23 @@ DEFAULT_SILENT_START_TIMEOUT = 4.0
 
 
 def _silence_threshold() -> float:
-    """RMS threshold below which audio is considered silence.
-    (-30 dB = 0.0316, -40 dB = 0.01, -50 dB = 0.003) Configurable via settings.json."""
-    return settings.get('silence_threshold')
+    """RMS below which a live audio block counts as no signal at all, for the
+    silent-start auto-stop (nothing at the mic in the first few seconds).
+
+    IMPORTANT: this must stay at or below ``audio_level.SILENCE_FLOOR_RMS``.
+    The auto-stop fires *before* anything is analyzed and discards the
+    recording without a retry candidate, so a threshold above the floor
+    silently destroys quiet speech that the rest of the pipeline would have
+    happily transcribed — which is exactly what -40 dB used to do. It answers
+    "is the microphone dead", not "is this loud enough".
+    (-40 dB = 0.01, -52 dB = 0.0025, -60 dB = 0.001) Set in settings.json.
+    """
+    configured = settings.get('silence_threshold')
+    try:
+        configured = float(configured)
+    except (TypeError, ValueError):
+        return audio_level.SILENCE_FLOOR_RMS
+    return min(configured, audio_level.SILENCE_FLOOR_RMS)
 
 class AudioRecorder:
     # Controls how smooth/reactive the audio level indicator bar appears in the UI
@@ -54,7 +79,6 @@ class AudioRecorder:
         self.stream: Optional[sd.InputStream] = None
         self.file: Optional[sf.SoundFile] = None
         self._lock: threading.Lock = threading.Lock()
-        self.audio_data: list[np.ndarray] = []  # Store audio chunks for analysis
         self.silence_start: Optional[float] = None
         self.silent_start_timeout = silent_start_timeout
         self.auto_stopped = False
@@ -90,10 +114,24 @@ class AudioRecorder:
         self.continuation_chunk = False
         self._loopback = None  # LoopbackRecorder instance while recording
         self._mic_first_block_time: Optional[float] = None
+        # Rolling speaking-level estimate over the last few seconds, so the app
+        # can warn the user that they are too quiet WHILE they dictate instead
+        # of after. Fed from the audio callback, read from the UI watchdog.
+        self.level_tracker = LiveLevelTracker()
 
     def _calculate_level(self, indata: np.ndarray) -> float:
         """Calculate audio level from input data"""
         rms = np.sqrt(np.mean(np.square(indata)))
+
+        # Feed the rolling speaking-level estimate (drives the mid-recording
+        # "you are very quiet" note). Meeting mode is excluded: its mic channel
+        # is legitimately silent while the far side talks.
+        if not self.meeting_mode:
+            # monotonic, not time.time(): see LiveLevelTracker's docstring.
+            # The block's real duration goes with it so a stalled callback
+            # cannot inflate the measured amount of speech.
+            self.level_tracker.add(float(rms), time.monotonic(),
+                                   len(indata) / float(self.samplerate))
 
         # Convert to dB for level display
         db = 20 * np.log10(max(1e-10, rms))
@@ -129,34 +167,53 @@ class AudioRecorder:
         return self.smoothed_level
 
     def analyze_recording(self, filepath: Optional[str] = None) -> Tuple[bool, str]:
-        """Analyze the recorded audio file for silence and duration.
+        """Decide whether a finished recording is worth transcribing.
+
+        IMPORTANT: this rejects only audio with no speech in it at all (a muted
+        mic, the wrong input device, a dead stream). It does NOT reject quiet
+        speech. The previous version compared the whole file's mean RMS against
+        a fixed threshold, which counted pauses as signal: the same sentence
+        scored several dB lower when the user paused to think, so long, real
+        dictations were the ones most likely to be thrown away. Level advice
+        now travels separately, via level_report().
 
         Returns:
             Tuple[bool, str]: (is_valid, reason_if_invalid)
         """
         try:
             with sf.SoundFile(filepath or self.filename) as audio_file:
-                # Check duration
                 duration = len(audio_file) / audio_file.samplerate
                 if duration < MIN_DURATION:
                     return False, f"Recording too short ({duration:.1f}s < {MIN_DURATION}s)"
-
-                # Read the entire file
-                audio_data = audio_file.read()
-
-                # Calculate RMS value
-                rms = np.sqrt(np.mean(np.square(audio_data)))
-
-                # Check if mostly silence
-                threshold = _silence_threshold()
-                if rms < threshold:
-                    db_value = 20 * np.log10(max(1e-10, rms))
-                    return False, f"Recording contains mostly silence (RMS: {rms:.4f} / {db_value:.1f}dB < threshold: {threshold:.4f})"
-
-                return True, ""
-
+                report = self._analyze_levels(audio_file)
         except Exception as e:
-            return False, f"Error analyzing audio: {str(e)}"
+            # Distinguished from "no signal" by the caller: a recording we
+            # could not read must never be deleted as if it were empty.
+            logger.error(f"Could not analyze recording: {e}", exc_info=True)
+            return False, f"{ANALYSIS_ERROR_PREFIX}{e}"
+
+        if not report.has_signal:
+            return False, f"No signal in recording ({report.describe()})"
+        if report.verdict != audio_level.VERDICT_OK:
+            # Logged so a "why was that transcript bad" question later has the
+            # level to look at, without needing the audio itself.
+            logger.info(f"Recording level: {report.describe()}")
+        return True, ""
+
+    @staticmethod
+    def _analyze_levels(audio_file: "sf.SoundFile") -> audio_level.LevelReport:
+        """Level report for an open sound file, read in blocks.
+
+        Blocks rather than one read: a 15-minute stereo meeting recording is
+        ~160 MB as float32 and squaring it for the RMS briefly doubles that,
+        which is a lot of transient pressure at exactly the moment a chunk
+        rollover is also recording and transcribing.
+        """
+        frame_len = audio_level.frame_length(audio_file.samplerate)
+        return audio_level.analyze_blocks(
+            audio_file.blocks(blocksize=frame_len * ANALYSIS_FRAMES_PER_BLOCK,
+                              dtype='float32'),
+            audio_file.samplerate)
 
     def _record(self) -> None:
         """Record audio in a separate thread"""
@@ -263,6 +320,8 @@ class AudioRecorder:
         self.silence_start = None
         self.initial_sound_detected = False
         self._mic_first_block_time = None
+        if not self.continuation_chunk:
+            self.level_tracker.reset()
         self._loopback = None
         if self.meeting_mode:
             try:
@@ -274,7 +333,11 @@ class AudioRecorder:
                 self._loopback = None
         self.recording_start_time = time.time()
         self.recording = True
-        self.thread = threading.Thread(target=self._record)
+        # Daemon: stop() joins with a timeout and force-closes the stream
+        # and file if that expires, so a wedged capture thread must not
+        # also keep the process (and the single-instance mutex) alive
+        # after the UI has gone.
+        self.thread = threading.Thread(target=self._record, daemon=True)
         self.thread.start()
 
     def stop(self) -> None:

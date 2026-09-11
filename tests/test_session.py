@@ -11,6 +11,7 @@ Contracts:
   names the last failure and points retry at the last failed file; nothing
   paints over a dictation that is mid-pipeline.
 """
+import os
 import threading
 import time
 from typing import Callable, Dict, List, Tuple
@@ -98,10 +99,15 @@ class GatedTranscriber:
     def __init__(self) -> None:
         self.gates: Dict[str, threading.Event] = {}
         self.failures: Dict[str, List[BaseException]] = {}
+        self.results: Dict[str, str] = {}
         self._lock = threading.Lock()
 
     def fail_next(self, path: str, exc: BaseException) -> None:
         self.failures.setdefault(path, []).append(exc)
+
+    def returns(self, path: str, text: str) -> None:
+        """Make this path transcribe to exactly `text` (e.g. '' or '   ')."""
+        self.results[path] = text
 
     def release(self, path: str) -> None:
         self.gates.setdefault(path, threading.Event()).set()
@@ -114,6 +120,8 @@ class GatedTranscriber:
             queued = self.failures.get(path)
             if queued:
                 raise queued.pop(0)
+            if path in self.results:
+                return self.results[path]
         return f"text:{path}"
 
 
@@ -187,6 +195,144 @@ def test_reset_defuses_timers_from_a_previous_session() -> None:
     notes.set_state("📤 transcribing…")  # next session
     sched.advance(5.1)
     assert shown[-1] == "📤 transcribing…"
+
+
+def test_warning_outranks_the_routine_state_line() -> None:
+    """A quiet mic is actionable and time-sensitive; the queue count is not."""
+    notes, shown, _ = make_notes()
+    notes.set_state("⏳ 2 queued")
+    notes.set_warning("🔈 very quiet — check your mic")
+    assert shown[-1] == "🔈 very quiet — check your mic"
+
+
+def test_clearing_a_warning_restores_the_state_underneath() -> None:
+    """The bug this layer exists for: the level warning and the session queue
+    count shared one slot, so clearing one erased the other."""
+    notes, shown, _ = make_notes()
+    notes.set_state("⏳ 2 queued")
+    notes.set_warning("🔈 very quiet — check your mic")
+    notes.set_warning("")
+    assert shown[-1] == "⏳ 2 queued"
+
+
+def test_state_keeps_updating_underneath_a_warning() -> None:
+    notes, shown, _ = make_notes()
+    notes.set_warning("🔈 very quiet — check your mic")
+    notes.set_state("⏳ 3 queued")
+    assert shown[-1] == "🔈 very quiet — check your mic"
+    notes.set_warning("")
+    assert shown[-1] == "⏳ 3 queued"
+
+
+def test_alert_outranks_a_warning_and_expires_back_to_it() -> None:
+    notes, shown, sched = make_notes()
+    notes.set_warning("🔈 very quiet — check your mic")
+    notes.set_alert("⚠️ chunk 2 failed", 6.0)
+    assert shown[-1] == "⚠️ chunk 2 failed"
+    sched.advance(6.2)
+    assert shown[-1] == "🔈 very quiet — check your mic"
+
+
+def test_repeating_the_same_warning_does_not_repaint() -> None:
+    """The watchdog calls this every 100ms; it must be free when unchanged."""
+    notes, shown, _ = make_notes()
+    notes.set_warning("🔈 very quiet — check your mic")
+    before = len(shown)
+    for _ in range(20):
+        notes.set_warning("🔈 very quiet — check your mic")
+    assert len(shown) == before
+
+
+def test_reset_clears_the_warning_layer_too() -> None:
+    notes, shown, _ = make_notes()
+    notes.set_warning("🔈 very quiet — check your mic")
+    notes.reset()
+    assert shown[-1] == ""
+    notes.set_state("📤 transcribing…")
+    assert shown[-1] == "📤 transcribing…"
+
+
+def test_blank_chunk_is_never_pasted_and_never_deleted(tmp_path) -> None:
+    """A chunk the provider heard nothing in must not paste a bare newline,
+    and must not be thrown away — the audio is the user's only copy."""
+    session, host, t, shown = make_session(tmp_path)
+    a = chunk(tmp_path, "a.wav")
+    t.returns(a, "")
+    session.submit(a)
+    t.release(a)
+    wait_for(lambda: host.retry_candidate == [a])
+    assert host.delivered == []
+    assert os.path.exists(a)
+
+
+def test_whitespace_only_chunk_counts_as_blank(tmp_path) -> None:
+    session, host, t, shown = make_session(tmp_path)
+    a = chunk(tmp_path, "a.wav")
+    t.returns(a, " " * 3 + chr(10) + "  ")
+    session.submit(a)
+    t.release(a)
+    wait_for(lambda: host.retry_candidate == [a])
+    assert host.delivered == []
+
+
+def test_a_blank_chunk_does_not_burn_the_preamble(tmp_path) -> None:
+    """The preamble is pasted once, ahead of the first real text. A silent
+    first chunk must not consume it and leave the transcript unlabelled."""
+    session, host, t, shown = make_session(tmp_path)
+    a, b = chunk(tmp_path, "a.wav"), chunk(tmp_path, "b.wav")
+    t.returns(a, "")
+    session.submit(a)
+    session.submit(b)
+    t.release(a)
+    t.release(b)
+    wait_for(lambda: len(host.delivered) == 1)
+    assert host.delivered[0].startswith(build_preamble(SETTINGS.get, False))
+    assert "text:" + b in host.delivered[0]
+
+
+def test_a_kept_blank_chunk_is_protected_from_the_snapshot_sweeper(tmp_path) -> None:
+    """The queue treats a blank chunk as delivered and forgets it, so the
+    session has to report it or _sweep_snapshots deletes the retry candidate."""
+    session, host, t, _ = make_session(tmp_path)
+    a = chunk(tmp_path, "a.wav")
+    t.returns(a, "")
+    session.submit(a)
+    t.release(a)
+    wait_for(lambda: host.retry_candidate == [a])
+    assert a in session.active_paths()
+
+
+def test_a_finished_drained_session_releases_its_blank_chunk(tmp_path) -> None:
+    """Otherwise every session leaves one abandoned chunk sweep-protected for
+    the rest of the process. Once drained, the file is protected only while it
+    is still the app's retry candidate."""
+    session, host, t, _ = make_session(tmp_path)
+    a = chunk(tmp_path, "a.wav")
+    t.returns(a, "")
+    session.submit(a)
+    t.release(a)
+    wait_for(lambda: host.retry_candidate == [a])
+    assert a in session.active_paths()      # still live
+    session.close()
+    session.live = False                    # what the app does at session end
+    wait_for(lambda: session.active_paths() == [])
+
+
+def test_only_the_newest_blank_chunk_is_kept(tmp_path) -> None:
+    """Only one file can be the retry candidate, so a long meeting must not
+    hoard every silent chunk."""
+    session, host, t, _ = make_session(tmp_path)
+    a, b = chunk(tmp_path, "a.wav"), chunk(tmp_path, "b.wav")
+    t.returns(a, "")
+    t.returns(b, "")
+    session.submit(a)
+    session.submit(b)
+    t.release(a)
+    t.release(b)
+    wait_for(lambda: host.retry_candidate[-1:] == [b])
+    assert not os.path.exists(a), "superseded blank chunk should be deleted"
+    assert os.path.exists(b)
+    assert session.active_paths() == [b]
 
 
 # --- build_preamble ----------------------------------------------------------

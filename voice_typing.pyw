@@ -19,8 +19,10 @@ from modules.error_messages import (
 from modules import updater
 from modules.history import TranscriptionHistory
 from modules.hotkey import CapsLockHotkey, HotkeyAction
+from modules import audio_level
 from modules.paths import RECORDINGS_DIR
-from modules.recorder import AudioRecorder, DEFAULT_SILENT_START_TIMEOUT
+from modules.recorder import (AudioRecorder, ANALYSIS_ERROR_PREFIX,
+                              DEFAULT_SILENT_START_TIMEOUT)
 from modules.session import ConversationSession, SessionNotes
 from modules.settings import Settings, api_key_configured
 from modules.settings import startup_notes as settings_startup_notes
@@ -365,6 +367,7 @@ class VoiceTypingApp:
                     self._session = self._start_session(phone=self.recorder.phone_mode)
 
                 self.logger.info(f"🎙️ Starting recording...{mode_note}")
+                self._notes.reset()
                 self.last_recording = None
                 self.recording = True
                 self.recorder.start()
@@ -406,11 +409,26 @@ class VoiceTypingApp:
             if self.recorder.was_auto_stopped():
                 if stream_session is not None:
                     stream_session.abort()
+                # Keep the audio and offer the retry even though nothing was
+                # heard. The silent-start check judges whole PortAudio
+                # callback blocks while the real analysis judges 30ms frames,
+                # so a sparse or very quiet start can average below the floor
+                # per block while still containing speech. Sealing here makes
+                # that mismatch survivable instead of silently destructive:
+                # the user can send the recording anyway.
+                try:
+                    self.last_recording = self._seal_recording(gen) or self.recorder.filename
+                    self._sweep_snapshots(keep=self.last_recording)
+                except OSError:
+                    self.logger.error("Could not keep auto-stopped recording", exc_info=True)
                 self.status_manager.set_status(
                     AppStatus.ERROR,
                     "⚠️ Recording stopped: No audio detected"
                 )
-                self.logger.warning("Recording auto-stopped due to initial silence")
+                self.ui_feedback.show_error_with_retry(
+                    "⚠️ Stopped: nothing heard from your mic")
+                self.logger.warning("Recording auto-stopped due to initial silence; "
+                                    "audio kept for retry")
                 self.recorder.auto_stopped = False
                 return
 
@@ -433,7 +451,7 @@ class VoiceTypingApp:
             # Older snapshots are no longer retry candidates; drop them
             self._sweep_snapshots(keep=self.last_recording)
             self.status_manager.set_status(AppStatus.PROCESSING)
-            self.process_audio(stream_session)
+            self.process_audio(stream_session, recording_path=self.last_recording)
 
     def _flush_chunk(self, expected_gen: Optional[int] = None) -> None:
         """Seal the current chunk, queue it for transcription, resume recording.
@@ -473,6 +491,13 @@ class VoiceTypingApp:
                 if is_valid:
                     index = self._session.submit(snapshot)
                     self.logger.info(f"Chunk {index} queued for transcription")
+                elif reason.startswith(ANALYSIS_ERROR_PREFIX):
+                    # We could not read the file, which says nothing about
+                    # whether the user spoke. Keep it and point the tray retry
+                    # at it rather than deleting their words.
+                    self.logger.error(f"Could not analyze chunk, keeping it: {reason}")
+                    self._notes.set_alert("⚠️ chunk kept for retry", 5.0)
+                    self.set_retry_candidate(snapshot)
                 else:
                     # Quiet flush (nothing said since the last one): drop it
                     # without the error flash a failed dictation would get
@@ -520,11 +545,18 @@ class VoiceTypingApp:
                 self._recording_generation += 1
                 try:
                     snapshot = self._seal_recording(self._recording_generation)
-                    if snapshot and self.recorder.analyze_recording(snapshot)[0]:
-                        index = session.submit(snapshot)
-                        self.logger.info(f"Salvaged session tail as chunk {index} after recording error")
-                    elif snapshot:
-                        os.remove(snapshot)
+                    if snapshot:
+                        ok, reason = self.recorder.analyze_recording(snapshot)
+                        if ok or reason.startswith(ANALYSIS_ERROR_PREFIX):
+                            # Send it, or keep it when we could not even read
+                            # it — a failed analysis says nothing about
+                            # whether the user spoke, and this tail is the
+                            # audio captured right before the device died.
+                            index = session.submit(snapshot)
+                            self.logger.info(
+                                f"Salvaged session tail as chunk {index} after recording error")
+                        else:
+                            os.remove(snapshot)
                 except OSError:
                     self.logger.warning("Could not salvage session tail", exc_info=True)
             try:
@@ -670,14 +702,63 @@ class VoiceTypingApp:
             # Self-heal: if a stale processing thread overwrote our status, reassert it
             if self.status_manager.current_status != self._active_recording_status:
                 self.status_manager.set_status(self._active_recording_status)
+            self._update_level_note()
             self.ui_feedback.after(100, lambda: self._check_recorder_status(token))
 
-    def process_audio(self, stream_session=None) -> None:
+    # Wait this long before judging the level: the first moments of a
+    # recording are the user settling in, and a verdict from one block is
+    # noise. Long enough to be sure, short enough to save the dictation.
+    #
+    # NOTE: this is deliberately longer than the default 4s silent-start
+    # auto-stop, so a genuinely dead microphone is reported by that (which
+    # says "Recording stopped: No audio detected" and stops wasting the
+    # user's breath) rather than by a note they would have ~1s to read. The
+    # note is for the case the auto-stop must NOT catch: a mic that is
+    # working but too quiet, which keeps recording.
+    LEVEL_NOTE_AFTER_S = 5.0
+
+    def _update_level_note(self) -> None:
+        """Warn on the indicator while the user is still speaking if their mic
+        is too quiet to transcribe well.
+
+        This is the cheap half of the quiet-mic problem: by the time a
+        recording is analyzed the user has already spent a minute talking, so
+        the warning has to arrive during the recording, not after it. Runs on
+        the main thread from the watchdog; SessionNotes.set_warning is
+        idempotent, so an unchanged note never repaints.
+        """
+        note = ''
+        tracker = self.recorder.level_tracker
+        if tracker.elapsed(time.monotonic()) >= self.LEVEL_NOTE_AFTER_S:
+            verdict = tracker.verdict()
+            if verdict == audio_level.VERDICT_SILENT:
+                note = '🔇 no sound from your mic'
+            elif verdict == audio_level.VERDICT_VERY_QUIET:
+                note = '🔈 very quiet — check your mic'
+        # The sticky warning layer, not set_state: a conversation session uses
+        # the state line for its queue count, and not show_warning either —
+        # the elapsed-time ticker repaints over notice text. set_warning is
+        # idempotent, so calling it every tick costs nothing.
+        self._notes.set_warning(note)
+
+    def process_audio(self, stream_session=None,
+                      recording_path: Optional[str] = None) -> None:
+        """Transcribe a finished dictation on a worker thread.
+
+        recording_path is captured by the caller and passed down rather than
+        re-read from self.last_recording: that field is mutable and a
+        conversation-session callback can overwrite it (it only skips when a
+        dictation is already in flight, and this thread is not alive yet), in
+        which case this run would analyze, transcribe and paste some other
+        recording's audio.
+        """
         try:
             self.cancel_flag.clear()
             gen = self._recording_generation
+            path = recording_path or self.last_recording
             self.processing_thread = threading.Thread(
-                target=self._process_audio_thread, args=(gen, stream_session))
+                target=self._process_audio_thread, args=(gen, stream_session, path),
+                daemon=True)
             self.processing_thread.start()
         except Exception as e:
             if stream_session is not None:
@@ -690,10 +771,14 @@ class VoiceTypingApp:
         """Check if this processing run has been superseded by a newer recording."""
         return gen != self._recording_generation or self.cancel_flag.is_set()
 
-    def _process_audio_thread(self, gen: int, stream_session=None) -> None:
+    def _process_audio_thread(self, gen: int, stream_session=None,
+                              recording_path: Optional[str] = None) -> None:
         try:
             self.logger.info("Starting audio processing")
-            is_valid, reason = self.recorder.analyze_recording(self.last_recording)
+            # This run's own path; see process_audio for why it is not
+            # self.last_recording
+            path = recording_path or self.last_recording
+            is_valid, reason = self.recorder.analyze_recording(path)
 
             if self._is_stale(gen):
                 if stream_session is not None:
@@ -707,10 +792,22 @@ class VoiceTypingApp:
                 if self._is_stale(gen):
                     return
                 self.logger.warning(f"Skipping transcription: {reason}")
-                self.status_manager.set_status(
-                    AppStatus.ERROR,
-                    "⛔ Skipped: " + ("too short" if "short" in reason.lower() else "mostly silence")
-                )
+                # The audio is still on disk — _sweep_snapshots keeps
+                # last_recording — so never imply it was lost, whatever the
+                # reason. Offer the retry that sends it anyway: the check can
+                # only be wrong in this direction, and the user knows whether
+                # they spoke better than any threshold does.
+                if reason.startswith(ANALYSIS_ERROR_PREFIX):
+                    short, overlay = ("⛔ Could not read recording",
+                                      "⛔ Could not read the recording")
+                elif "short" in reason.lower():
+                    short, overlay = ("⛔ Skipped: too short",
+                                      "⛔ Too short — nothing was recorded")
+                else:
+                    short, overlay = ("⛔ Skipped: nothing heard",
+                                      "⛔ Nothing heard — your mic may be muted or too quiet")
+                self.status_manager.set_status(AppStatus.ERROR, short)
+                self.ui_feedback.show_error_with_retry(overlay)
                 return
 
             # Streaming path: the realtime session already has the audio; just
@@ -727,7 +824,8 @@ class VoiceTypingApp:
                     stream_session.abort()
 
             self.logger.info("Starting transcription")
-            success, result = self._attempt_transcription(streamed_text=streamed_text)
+            success, result = self._attempt_transcription(
+                recording_path=path, streamed_text=streamed_text)
 
             if self._is_stale(gen):
                 self.logger.info("Processing cancelled (stale generation).")
@@ -737,9 +835,10 @@ class VoiceTypingApp:
                 if self._is_stale(gen):
                     return
                 self._report_failure(result)
-            elif result:
+            elif result and result.strip():
                 if self._is_stale(gen):
                     return
+                result = result.strip()
                 self.history.add(result)
                 self.ui_feedback.insert_text(result)
                 if self.update_icon_menu:
@@ -751,6 +850,18 @@ class VoiceTypingApp:
                     self.logger.info(f"Transcription completed ({len(result)} chars): {preview}")
                 else:
                     self.logger.info(f"Transcription completed ({len(result)} chars)")
+            else:
+                # The provider succeeded but returned nothing. Without this the
+                # status was never cleared and the indicator sat on
+                # "Transcribing" until the next recording, so the only way out
+                # was to cancel. The audio is still on disk, so offer the retry
+                # in case the provider simply hiccuped.
+                if self._is_stale(gen):
+                    return
+                self.logger.info("Transcription returned no text")
+                self.status_manager.set_status(AppStatus.ERROR, "⛔ Nothing transcribed")
+                self.ui_feedback.show_error_with_retry(
+                    "⛔ Nothing transcribed — no speech was recognised")
 
         except Exception as e:
             if self._is_stale(gen):
@@ -802,6 +913,14 @@ class VoiceTypingApp:
             if self.cancel_flag.is_set():
                 return False, CANCELLED
 
+            # Before cleaning, not after: the LLM given an empty transcript
+            # can return plausible-looking invented text, which would then be
+            # pasted as a successful dictation. Whitespace-only counts as
+            # empty (it is truthy, so it would slip past the caller's check).
+            if not text or not text.strip():
+                return True, ''
+            text = text.strip()
+
             # Meeting/phone transcripts are speaker-labeled; LLM cleaning would
             # mangle the labels, so skip it for those recordings
             if self.clean_transcription_enabled and not is_conversation_recording(path):
@@ -815,8 +934,14 @@ class VoiceTypingApp:
                         model=self.settings.get('llm_model'),
                         timeout=self.settings.get('cleaning_timeout'),
                         base_url=self.settings.get('llm_base_url') or None)
+                    if not cleaned_text or not cleaned_text.strip():
+                        # Cleaning swallowed the transcript. The raw words are
+                        # right here; never hand back nothing.
+                        self.logger.warning("LLM cleaning returned empty text; "
+                                            "using the raw transcript")
+                        return True, text
                     self.logger.info("Transcription cleaned successfully")
-                    return True, cleaned_text
+                    return True, cleaned_text.strip()
                 except Exception as e:
                     self.logger.warning(f"LLM cleaning failed, falling back to raw transcription. Error: {e}")
                     # Show a brief warning that we're using the fallback
@@ -857,7 +982,8 @@ class VoiceTypingApp:
                 if self._is_stale(gen):
                     self.logger.info("Retry result discarded (superseded by a newer recording)")
                     return
-                if success and result:
+                if success and result and result.strip():
+                    result = result.strip()
                     self.history.add(result)
                     pyperclip.copy(result)  # Copy to clipboard instead of direct insertion
                     self.status_manager.set_status(AppStatus.IDLE)
@@ -1036,11 +1162,22 @@ class VoiceTypingApp:
             sys.exit(0)
 
     def cleanup(self) -> None:
-        """Ensure proper cleanup of all resources"""
+        """Ensure proper cleanup of all resources.
+
+        The transcription worker is a daemon thread and is asked to cancel
+        here, but never joined: it may be blocked on a provider upload with
+        no timeout of its own, and waiting would keep the process (and the
+        single-instance mutex with it) alive after the UI is gone, blocking
+        the next launch or an update install. Anything it still delivers is
+        discarded by the stale-generation checks.
+        """
         self.logger.info("Cleaning up application resources")
+        self.cancel_flag.set()
         self.listener.stop()
         if self.recording:
             self.recorder.stop()
+        if self._session is not None:
+            self._session.cancel()
         self.ui_feedback.cleanup()
 
     def handle_ui_click(self) -> None:

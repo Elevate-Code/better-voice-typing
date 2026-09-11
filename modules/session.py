@@ -7,9 +7,10 @@ owns everything about that flow that does not touch the recorder:
 
 - ``build_preamble``: the transcript-limitations note pasted once ahead of
   the first chunk (pure settings → text).
-- ``SessionNotes``: the two-layer status note on the recording indicator — a
-  routine STATE line (transcribing / queued / pasted) plus a timed ALERT
-  (chunk retrying, failed, quiet flush) that expires back to the state.
+- ``SessionNotes``: the three-layer status note on the recording indicator —
+  a routine STATE line (transcribing / queued / pasted), a sticky WARNING
+  above it (the mic is too quiet) and a timed ALERT above both (chunk
+  retrying, failed, quiet flush) that expires back to what is underneath.
 - ``ConversationSession``: one session's queue, preamble, failure summary
   and delivery callbacks. It talks to the app only through ``SessionHost``,
   so tests drive it with fakes and no Tk, recorder, or provider.
@@ -76,12 +77,24 @@ def _timer_schedule(delay_s: float, fn: Callable[[], None]) -> None:
 
 
 class SessionNotes:
-    """Recording-indicator note: a STATE line with an optional timed ALERT.
+    """Recording-indicator note, in three layers of decreasing priority:
 
-    Alerts expire back to the current state, and a decaying state clears
-    itself unless superseded, so the label can never be left stale. One lock
-    serializes all writers (hook thread, queue workers, expiry timers), which
-    also keeps UI-queue ordering consistent with note ordering.
+    * ALERT — a timed message about something that just happened ("chunk 3
+      failed"). Expires back to whatever is underneath.
+    * WARNING — a sticky condition that stays true until it stops being true
+      ("your mic is very quiet"). Outranks the routine state because it is
+      actionable and the user is mid-recording; cleared explicitly.
+    * STATE — the routine line ("2 queued", "transcribing...").
+
+    The warning layer exists because the mid-recording level warning and the
+    session's queue count both want the indicator: sharing one slot meant
+    whichever wrote last erased the other, so clearing the level warning also
+    wiped the queue count.
+
+    A decaying state clears itself unless superseded, so the label can never
+    be left stale. One lock serializes all writers (hook thread, queue
+    workers, expiry timers), which also keeps UI-queue ordering consistent
+    with note ordering.
 
     ``show`` receives the text to display ('' clears). ``clock`` and
     ``schedule(delay_s, fn)`` are injectable for tests.
@@ -98,6 +111,7 @@ class SessionNotes:
         self._state_seq = 0
         self._alert = ''
         self._alert_until = 0.0
+        self._warning = ''
 
     def _push_locked(self) -> None:
         """Recompute and push the visible note. Caller holds the lock."""
@@ -105,7 +119,7 @@ class SessionNotes:
             note = self._alert
         else:
             self._alert = ''
-            note = self._state
+            note = self._warning or self._state
         self._show(note)
 
     def set_state(self, note: str, decay_s: float = 0.0, clear_alert: bool = False) -> None:
@@ -128,6 +142,15 @@ class SessionNotes:
                         self._push_locked()
             self._schedule(decay_s, decay)
 
+    def set_warning(self, note: str) -> None:
+        """Set (or clear, with '') the sticky condition line. Idempotent, so
+        a poller can call it every tick without repainting the indicator."""
+        with self._lock:
+            if note == self._warning:
+                return
+            self._warning = note
+            self._push_locked()
+
     def set_alert(self, note: str, duration_s: float) -> None:
         """Show a transient alert over the state line; it expires back to
         whatever the state line says then."""
@@ -138,19 +161,20 @@ class SessionNotes:
 
         def expire() -> None:
             # Re-evaluates under the lock: a newer/extended alert keeps
-            # showing, an expired one falls back to the current state
+            # showing, an expired one falls back to the warning or state
             with self._lock:
                 self._push_locked()
         self._schedule(duration_s + 0.1, expire)
 
     def reset(self) -> None:
-        """Clear both layers and invalidate outstanding decay timers, so a
-        previous session's timers can't touch a later session's notes."""
+        """Clear all three layers and invalidate outstanding decay timers, so
+        a previous session's timers can't touch a later session's notes."""
         with self._lock:
             self._state_seq += 1
             self._state = ''
             self._alert = ''
             self._alert_until = 0.0
+            self._warning = ''
             self._show('')
 
 
@@ -198,6 +222,11 @@ class ConversationSession:
         self._last_failure: Optional[TranscriptionFailure] = None
         # Sent once, ahead of whichever chunk is delivered first
         self._preamble_pending = bool(settings_get('session_preamble'))
+        # The one blank chunk kept for retry. Only one can be the retry
+        # candidate, so keeping every blank chunk of a long meeting would
+        # hoard minutes of audio per chunk for no benefit; superseding one
+        # deletes it. Touched only from the queue's single delivery thread.
+        self._blank_path: Optional[str] = None
         self._queue = ChunkQueue(
             transcribe_fn=transcribe_fn,
             on_result=self._on_result,
@@ -222,8 +251,22 @@ class ConversationSession:
         self._queue.cancel()
 
     def active_paths(self) -> List[str]:
-        """Files this session still needs (pending chunks + kept failures)."""
-        return self._queue.active_paths()
+        """Files this session still needs: pending chunks, kept failures, and
+        — while the session is live or still draining — the blank chunk held
+        for retry (the queue counts that one as delivered and forgets it, so
+        the sweeper would otherwise delete it mid-session).
+
+        The blank is released once the session is finished and drained: from
+        then on it is protected only if it is still the app's retry candidate,
+        which `_sweep_snapshots(keep=last_recording)` handles. Holding it
+        forever would keep one abandoned chunk per session alive for the rest
+        of the process.
+        """
+        paths = self._queue.active_paths()
+        blank = self._blank_path
+        if blank and (self.live or paths):
+            paths.append(blank)
+        return paths
 
     @property
     def failed_paths(self) -> List[str]:
@@ -236,6 +279,24 @@ class ConversationSession:
         return self.live and self._host.is_current(self)
 
     def _on_result(self, index: int, text: str, path: str) -> None:
+        if not text or not text.strip():
+            # The provider heard nothing in this chunk. Delivering would
+            # paste a bare newline (and, for the first chunk, burn the
+            # preamble on it); deleting would throw away audio the user
+            # may want to retry. So do neither: keep this file and drop the
+            # blank one it supersedes.
+            logger.info(f"Chunk {index} transcribed to nothing; kept for retry")
+            previous, self._blank_path = self._blank_path, path
+            if previous and previous != path:
+                try:
+                    os.remove(previous)
+                except OSError:
+                    pass
+            if not self._host.dictation_in_progress():
+                self._host.set_retry_candidate(path)
+            if self._on_screen():
+                self._notes.set_alert(f"🔇 nothing heard in chunk {index}", 4.0)
+            return
         prefix = ""
         if self._preamble_pending:
             self._preamble_pending = False

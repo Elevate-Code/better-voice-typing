@@ -5,6 +5,23 @@
   "changelog": [
     {
       "category": "General",
+      "date": "2026-09-11",
+      "changes": [
+        "Fixed dictations being thrown away as “mostly silence” when they clearly contained speech. The check measured the average loudness of the whole recording, so every pause counted against you: the longer you spoke and the more you paused to think, the lower you scored, which meant the recordings most expensive to lose were the ones most likely to be discarded. It now looks for sound within the recording instead of averaging over it, and skips only audio with nothing in it at all, such as a muted microphone or the wrong input device.",
+        "A quiet microphone no longer costs you a recording. Being quiet now changes the advice you are given, not whether your words are transcribed. The same applies to the automatic stop for a silent start, which used to cancel a recording within seconds if you were simply speaking softly; it now waits for genuine silence.",
+        "Short answers are no longer discarded. A single word such as “yes” can be under a fifth of a second of sound, which the old minimum treated as an accidental key tap.",
+        "Every dictation the app declines to transcribe now says why and offers “click to retry”, which sends it anyway. That includes a recording stopped automatically because nothing was heard at the start, which used to be thrown away outright. The audio was always kept on disk in the other cases; there was previously no way to tell, so it looked lost.",
+        "The indicator now warns you while you are still speaking if your microphone is too quiet or silent, instead of letting you talk for a minute and finding out afterwards.",
+        "Fixed the indicator getting stuck on “Transcribing” forever when a transcription came back empty. The only way out was to cancel. It now reports that nothing was heard and offers a retry.",
+        "In Meeting and Phone mode, a chunk that transcribes to nothing is no longer pasted as a blank line, and its audio is kept for retry instead of being deleted. Transcript cleaning can also no longer replace an empty transcription with invented text.",
+        "The microphone test in the settings window now agrees with the recorder. It judged the loudest instant over a few seconds while the recorder judged the whole-file average, so it could report “Hearing you loud and clear” about a microphone whose recordings were then rejected. It now reports your actual speaking level in dB, tells you what to aim for, and its meter uses a decibel scale with a target mark, so a working microphone fills the middle of the bar rather than the first two segments.",
+        "Analysing a long recording no longer loads it into memory all at once, which previously needed several hundred megabytes for a 15-minute meeting and could cost you a chunk if it failed.",
+        "Fixed a rare case where finishing a dictation while a Meeting or Phone session was still delivering could transcribe and paste the wrong recording.",
+        "Quitting while a transcription was still uploading no longer leaves the app running invisibly in the background, where it would block the next launch or an update from installing."
+      ]
+    },
+    {
+      "category": "General",
       "date": "2026-09-04",
       "version": "1.0.0",
       "changes": [

@@ -13,12 +13,21 @@ the devices present right now) is NOT a migration; that lives in
 Versions:
 - 0: every settings.json written before 1.0 (no ``schema_version`` key).
 - 1: 1.0 — all pre-1.0 one-shot migrations folded into one step.
+- 2: silence_threshold lowered from the old -40 dB default to the -52 dB
+  signal floor (the -40 dB value auto-stopped quiet speech).
 """
 from typing import Any, Dict, List, Tuple
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DEFAULT_LLM_MODEL = 'gpt-4o-mini'
+
+# The pre-2.0 silence_threshold default (-40 dB) and its replacement (-52 dB,
+# audio_level.SILENCE_FLOOR_RMS). Duplicated as a literal on purpose: a
+# migration must describe the past, so it cannot follow a constant that later
+# changes. See _to_v2.
+OLD_SILENCE_THRESHOLD = 0.01
+NEW_SILENCE_THRESHOLD = 0.0025
 
 OBSOLETE_KEYS = (
     'continuous_capture',
@@ -38,10 +47,23 @@ def migrate(stored: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
         version = 0
     if version < 1:
         _to_v1(data, notes)
+    if version < 2:
+        _to_v2(data, notes)
     if data.get('schema_version') != SCHEMA_VERSION:
         data['schema_version'] = SCHEMA_VERSION
         notes.append(f"schema_version set to {SCHEMA_VERSION}")
     return data, notes
+
+
+def _to_v2(data: Dict[str, Any], notes: List[str]) -> None:
+    # The silent-start auto-stop fires before any analysis and keeps no retry
+    # candidate, so a -40 dB threshold silently destroyed quiet-but-real
+    # speech. Only the old default is moved: a value the user deliberately
+    # changed is left alone (the recorder clamps it down anyway).
+    if data.get('silence_threshold') == OLD_SILENCE_THRESHOLD:
+        data['silence_threshold'] = NEW_SILENCE_THRESHOLD
+        notes.append(f"silence_threshold {OLD_SILENCE_THRESHOLD} (-40dB, auto-stopped quiet "
+                     f"speech) -> {NEW_SILENCE_THRESHOLD} (-52dB)")
 
 
 def _to_v1(data: Dict[str, Any], notes: List[str]) -> None:

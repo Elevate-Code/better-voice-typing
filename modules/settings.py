@@ -106,7 +106,13 @@ class Settings:
             'schema_version': SCHEMA_VERSION,
 
             'silent_start_timeout': 4.0,
-            'silence_threshold': 0.01,  # RMS threshold for silence detection (0.01 = -40dB)
+            # Live silent-start auto-stop only ("is the microphone dead",
+            # in the first few seconds). Whether a finished recording is
+            # worth transcribing is decided by modules/audio_level.py.
+            # Clamped to audio_level.SILENCE_FLOOR_RMS by the recorder: a
+            # higher value would auto-stop quiet speech before anything is
+            # analyzed, and that path keeps no retry candidate.
+            'silence_threshold': 0.0025,  # RMS, 0.0025 = -52dB
             'max_recording_duration': 900.0,  # Auto-stop (and still transcribe) after this many seconds; null to disable
 
             # 'elevenlabs', 'openai', 'custom', or null = auto (ElevenLabs

@@ -26,6 +26,7 @@ from modules import startup, transcribe
 from modules.audio_manager import get_default_device_id, get_input_devices, names_match
 from modules.env_file import KEY_NAMES, is_placeholder, read_env, update_env, validate_key
 from modules.logger import get_log_dir
+from modules import audio_level
 from modules.mic_test import MicMonitor
 from modules.paths import APP_DIR, APP_NAME, app_version
 from modules.settings import ENV_FILE, api_key_configured
@@ -125,12 +126,22 @@ class LevelMeter(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.level = 0.0
+        # Where a healthy speaking level starts, as a 0..1 position along the
+        # bars. Bars at or past it are drawn solid so the user can see the
+        # target rather than only read about it. 0 hides the marker.
+        self.target = 0.0
         self.setMinimumHeight(56)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def set_level(self, level: float) -> None:
         self.level = max(0.0, min(1.0, level))
         self.update()
+
+    def set_target(self, target: float) -> None:
+        target = max(0.0, min(1.0, target))
+        if target != self.target:
+            self.target = target
+            self.update()
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
@@ -153,6 +164,14 @@ class LevelMeter(QWidget):
                 color.setAlphaF(0.35 + 0.65 * strength)
             p.setBrush(color)
             p.drawRoundedRect(QRectF(x, 8, bar_w, self.height() - 16), 5, 5)
+        if self.target > 0:
+            # Tick marking where a healthy speaking level starts, so "too
+            # quiet" is something the user can see rather than only read.
+            tick = QColor(self.palette().windowText().color())
+            tick.setAlphaF(0.45)
+            p.setBrush(tick)
+            tx = self.target * (w + gap) - gap / 2 - 1
+            p.drawRoundedRect(QRectF(tx, 2, 2, self.height() - 4), 1, 1)
         p.end()
 
 
@@ -402,16 +421,25 @@ class MicPanel(QWidget):
             self._restart_monitor()
             return
         self.meter.set_level(self.monitor.level())
+        self.meter.set_target(self.monitor.target_level())
         verdict = self.monitor.verdict()
+        db = self.monitor.speech_db()
         if verdict == 'error':
             self._set_verdict(f'Could not open this microphone: {self.monitor.error}', 'bad')
-        elif verdict == 'ok':
-            self._set_verdict('Hearing you loud and clear.', 'ok')
+        elif verdict == audio_level.VERDICT_OK:
+            self._set_verdict(f'Hearing you loud and clear ({db:.0f} dB).', 'ok')
+        elif verdict == audio_level.VERDICT_QUIET:
+            # Usable, but close enough to the edge to be worth fixing before it
+            # starts costing transcription accuracy.
+            self._set_verdict(f'Usable but quiet ({db:.0f} dB, aim for '
+                              f'{audio_level.GOOD_DB:.0f} dB or louder). Move closer, or raise '
+                              'this microphone’s level in Windows sound settings.', 'muted')
+        elif verdict == audio_level.VERDICT_VERY_QUIET:
+            self._set_verdict(f'Very quiet ({db:.0f} dB, aim for {audio_level.GOOD_DB:.0f} dB or '
+                              'louder). Raise this microphone’s level in Windows sound '
+                              'settings, move closer, or pick another microphone.', 'bad')
         elif self.monitor.heard_speech:
             self._set_verdict('Heard you a moment ago — keep talking to check the level holds.', 'muted')
-        elif verdict == 'quiet':
-            self._set_verdict('Very quiet. Move closer, raise the input level in Windows sound '
-                              'settings, or pick another microphone.', 'bad')
         else:
             self._set_verdict('Nothing yet. Speak normally; if the bars stay dark, check the mic '
                               'is not muted or choose another one. Wired and built-in mics are '

@@ -79,3 +79,39 @@ def test_fresh_or_garbage_version_is_treated_as_unversioned() -> None:
 def test_current_schema_needs_no_save() -> None:
     _, notes = migrate({"schema_version": SCHEMA_VERSION, "stt_provider": "openai"})
     assert notes == []
+
+
+# --- v2: the silent-start threshold ------------------------------------------
+
+def test_v2_moves_the_old_silence_threshold_default() -> None:
+    """-40dB auto-stopped quiet speech before anything could be analyzed, and
+    that path keeps no retry candidate, so the recording was simply lost."""
+    data, notes = migrate({"schema_version": 1, "silence_threshold": 0.01})
+    assert data["silence_threshold"] == 0.0025
+    assert any("silence_threshold" in n for n in notes)
+
+
+def test_v2_leaves_a_deliberately_chosen_threshold_alone() -> None:
+    """A value the user picked is theirs; the recorder clamps it at runtime."""
+    data, notes = migrate({"schema_version": 1, "silence_threshold": 0.05})
+    assert data["silence_threshold"] == 0.05
+    assert not any("silence_threshold" in n for n in notes)
+
+
+def test_v2_does_not_invent_a_threshold_when_none_is_stored() -> None:
+    data, _ = migrate({"schema_version": 1})
+    assert "silence_threshold" not in data
+
+
+def test_v2_also_runs_for_a_pre_1_0_settings_file() -> None:
+    data, _ = migrate({"silence_threshold": 0.01, "silence_timeout": 3.0})
+    assert data["silence_threshold"] == 0.0025
+    assert data["silent_start_timeout"] == 3.0
+    assert data["schema_version"] == SCHEMA_VERSION
+
+
+def test_v2_is_idempotent() -> None:
+    once, _ = migrate({"schema_version": 1, "silence_threshold": 0.01})
+    twice, notes = migrate(copy.deepcopy(once))
+    assert twice == once
+    assert notes == []
