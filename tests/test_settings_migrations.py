@@ -115,3 +115,41 @@ def test_v2_is_idempotent() -> None:
     twice, notes = migrate(copy.deepcopy(once))
     assert twice == once
     assert notes == []
+
+
+# --- forward compatibility ----------------------------------------------------
+
+def test_a_newer_schema_is_left_completely_alone() -> None:
+    """An older build must not stamp its own lower number on a newer file:
+    the newer build would then see a version below its own and re-run
+    migrations that had already been applied."""
+    future = {"schema_version": SCHEMA_VERSION + 1, "stt_provider": "openai",
+              "silence_threshold": 0.01, "a_setting_from_the_future": True}
+    data, notes = migrate(copy.deepcopy(future))
+    assert data == future
+    assert notes == []
+
+
+def test_a_newer_schema_is_not_rewritten_even_when_it_looks_migratable() -> None:
+    """0.01 is the exact value _to_v2 moves, and 'openai' the one _to_v1 moves;
+    neither may be touched in a file we do not understand."""
+    future = {"schema_version": 99, "silence_threshold": 0.01, "stt_provider": "openai",
+              "llm_model": "anthropic/claude-3-5-haiku-latest"}
+    data, notes = migrate(copy.deepcopy(future))
+    assert data == future
+    assert notes == []
+
+
+def test_the_current_schema_is_still_migrated_normally() -> None:
+    """The guard must trigger on strictly newer only, never on our own."""
+    _, notes = migrate({"schema_version": SCHEMA_VERSION})
+    assert notes == []
+    data, notes = migrate({"schema_version": SCHEMA_VERSION - 1, "silence_threshold": 0.01})
+    assert data["schema_version"] == SCHEMA_VERSION
+    assert data["silence_threshold"] == 0.0025
+
+
+def test_a_garbage_version_is_not_mistaken_for_a_future_one() -> None:
+    data, _ = migrate({"schema_version": "one", "silence_timeout": 2.0})
+    assert data["schema_version"] == SCHEMA_VERSION
+    assert data["silent_start_timeout"] == 2.0

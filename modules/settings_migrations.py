@@ -10,13 +10,20 @@ Anything that depends on the machine (resolving saved microphones against
 the devices present right now) is NOT a migration; that lives in
 ``Settings._reconcile_devices`` and reruns every launch.
 
+Forward compatibility: a settings.json written by a NEWER build is left
+completely alone. Migrations only ever run forwards, so an older build has
+nothing useful to say about a schema it does not know.
+
 Versions:
 - 0: every settings.json written before 1.0 (no ``schema_version`` key).
 - 1: 1.0 — all pre-1.0 one-shot migrations folded into one step.
 - 2: silence_threshold lowered from the old -40 dB default to the -52 dB
   signal floor (the -40 dB value auto-stopped quiet speech).
 """
+import logging
 from typing import Any, Dict, List, Tuple
+
+logger = logging.getLogger('voice_typing')
 
 SCHEMA_VERSION = 2
 
@@ -39,12 +46,30 @@ OBSOLETE_KEYS = (
 
 
 def migrate(stored: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
-    """Return ``(migrated copy, notes)``; ``notes`` is empty when nothing changed."""
+    """Return ``(migrated copy, notes)``; ``notes`` is empty when nothing changed.
+
+    A file from a newer schema is returned untouched, with no notes, so the
+    caller does not rewrite it — see ``_is_from_the_future``.
+    """
     data = dict(stored)
     notes: List[str] = []
     version = data.get('schema_version')
     if not isinstance(version, int) or version < 0:
         version = 0
+    if version > SCHEMA_VERSION:
+        # Written by a newer build — a dev checkout on the same machine, a
+        # downgrade, or a synced Documents folder. Hands off entirely.
+        #
+        # Stamping our own (lower) number on it would be a silent downgrade
+        # that the newer build then trusts: it would see a version below its
+        # own and re-run migrations that had already been applied. Returning
+        # no notes also means the caller writes nothing, so keys belonging to
+        # a schema we do not understand cannot be mangled on the way back out.
+        logger.warning(
+            f"settings.json is schema v{version}, newer than this build's "
+            f"v{SCHEMA_VERSION}; leaving it untouched. Settings this build "
+            "does not know about are kept as they are.")
+        return data, notes
     if version < 1:
         _to_v1(data, notes)
     if version < 2:
