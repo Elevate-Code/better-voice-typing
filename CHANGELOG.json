@@ -5,6 +5,15 @@
   "changelog": [
     {
       "category": "General",
+      "date": "2026-09-17",
+      "version": "1.0.1",
+      "changes": [
+        "The indicator now tells you when Windows has turned your microphone's input volume down, or muted it, while you are still speaking (for example “Windows mic volume is 42% — set it to 100”). Meeting apps with an “automatically adjust microphone” option quietly lower that setting, and every recording afterwards is captured too quietly without anything in the app looking wrong. The check reads the setting directly at the start of each recording instead of guessing from how loud you sound.",
+        "Every recording now logs its measured level, not only the quiet ones, so a poor transcript can be checked against what the microphone actually delivered."
+      ]
+    },
+    {
+      "category": "General",
       "date": "2026-09-11",
       "changes": [
         "Fixed dictations being thrown away as “mostly silence” when they clearly contained speech. The check measured the average loudness of the whole recording, so every pause counted against you: the longer you spoke and the more you paused to think, the lower you scored, which meant the recordings most expensive to lose were the ones most likely to be discarded. It now looks for sound within the recording instead of averaging over it, and skips only audio with nothing in it at all, such as a muted microphone or the wrong input device.",

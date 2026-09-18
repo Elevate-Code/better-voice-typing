@@ -31,7 +31,9 @@ from modules.transcribe import transcribe_audio, is_conversation_recording
 from modules.tray import setup_tray_icon
 from modules.tray_pin import promote_tray_icon
 from modules.ui import UIFeedback
-from modules.audio_manager import set_input_device, get_default_device_id, DeviceIdentifier, find_device_by_identifier
+from modules.audio_manager import (set_input_device, get_default_device_id, get_input_device,
+                                   get_device_by_id, DeviceIdentifier, find_device_by_identifier)
+from modules import endpoint_volume
 from modules.status_manager import StatusManager, AppStatus, RECORDING_STATUSES
 from modules.screen_utils import hide_console_window
 from modules.logger import setup_logging
@@ -86,6 +88,14 @@ class VoiceTypingApp:
         # Recording-indicator note (session state / timed alerts); see
         # modules/session.py. Also used for the odd mid-recording warning.
         self._notes = SessionNotes(self.ui_feedback.set_recording_note)
+        # Windows input volume of the recording device, read once per
+        # recording on a worker thread (endpoint_volume.check_async) and shown
+        # by _update_level_note. Stored WITH the generation it was read for
+        # and only consulted when that still matches: the callback checks the
+        # generation before storing, but a new recording can start between
+        # its check and its store, and the pair makes that harmless without a
+        # lock. None until the read lands.
+        self._endpoint_reading: Optional[Tuple[int, endpoint_volume.EndpointVolume]] = None
         # Scopes the recorder watchdog to the recording that scheduled it, so
         # a leftover poll from a just-stopped recording can't start a second
         # concurrent chain (which could double-fire stop/flush actions)
@@ -371,6 +381,7 @@ class VoiceTypingApp:
                 self.last_recording = None
                 self.recording = True
                 self.recorder.start()
+                self._check_input_volume(self._recording_generation)
                 play_if_enabled(self.settings, 'start')
                 self.status_manager.set_status(self._active_recording_status)
                 self._watchdog_token += 1
@@ -486,6 +497,10 @@ class VoiceTypingApp:
             # (where spoken words are lost) to just the stop/restart itself
             self.recorder.continuation_chunk = True
             self.recorder.start()
+            # The flush bumped the generation, which retires the previous
+            # chunk's volume reading; take a fresh one for this chunk so a
+            # volume change mid-session is noticed and the note survives.
+            self._check_input_volume(self._recording_generation)
             if snapshot:
                 is_valid, reason = self.recorder.analyze_recording(snapshot)
                 if is_valid:
@@ -717,6 +732,40 @@ class VoiceTypingApp:
     # working but too quiet, which keeps recording.
     LEVEL_NOTE_AFTER_S = 5.0
 
+    def _check_input_volume(self, gen: int) -> None:
+        """Read the recording device's Windows input volume for this recording.
+
+        The read is asynchronous (COM on a worker thread); the result lands
+        in _endpoint_reading tagged by generation, so a slow read from a
+        finished recording cannot describe the next one. Logged every time:
+        a bad transcript later needs to know the volume was normal too.
+        """
+        self._endpoint_reading = None
+        device_name: Optional[str] = None
+        device_id = get_input_device()
+        if device_id is not None:
+            device = get_device_by_id(device_id)
+            if device is None:
+                return  # selection vanished; the stream will report that
+            device_name = device['name']
+
+        def on_result(reading: Optional[endpoint_volume.EndpointVolume]) -> None:
+            if gen != self._recording_generation:
+                return
+            if reading is None:
+                self.logger.info("Windows input volume: could not be read for "
+                                 f"{device_name or 'the default microphone'}")
+                return
+            self._endpoint_reading = (gen, reading)
+            state = 'muted' if reading.muted else f"{reading.percent}%"
+            if endpoint_volume.volume_note(reading):
+                self.logger.warning(f"Windows input volume for '{reading.device_name}' is "
+                                    f"{state}; recordings are attenuated until it is 100%")
+            else:
+                self.logger.info(f"Windows input volume for '{reading.device_name}': {state}")
+
+        endpoint_volume.check_async(device_name, on_result)
+
     def _update_level_note(self) -> None:
         """Warn on the indicator while the user is still speaking if their mic
         is too quiet to transcribe well.
@@ -727,9 +776,14 @@ class VoiceTypingApp:
         the main thread from the watchdog; SessionNotes.set_warning is
         idempotent, so an unchanged note never repaints.
         """
-        note = ''
+        # The Windows input volume outranks the level verdicts: when it is
+        # low or muted it is the CAUSE of whatever the level looks like, and
+        # unlike the bands it names the fix. It also needs no settling time.
+        reading = self._endpoint_reading
+        current = reading[1] if reading and reading[0] == self._recording_generation else None
+        note = endpoint_volume.volume_note(current)
         tracker = self.recorder.level_tracker
-        if tracker.elapsed(time.monotonic()) >= self.LEVEL_NOTE_AFTER_S:
+        if not note and tracker.elapsed(time.monotonic()) >= self.LEVEL_NOTE_AFTER_S:
             verdict = tracker.verdict()
             if verdict == audio_level.VERDICT_SILENT:
                 note = '🔇 no sound from your mic'

@@ -194,10 +194,11 @@ class AudioRecorder:
 
         if not report.has_signal:
             return False, f"No signal in recording ({report.describe()})"
-        if report.verdict != audio_level.VERDICT_OK:
-            # Logged so a "why was that transcript bad" question later has the
-            # level to look at, without needing the audio itself.
-            logger.info(f"Recording level: {report.describe()}")
+        # Logged for EVERY recording, not just the ones the bands call quiet:
+        # when a transcript comes back bad, the question is whether the level
+        # was normal for this user, and that needs the healthy readings too.
+        # One line per recording is the whole cost.
+        logger.info(f"Recording level: {report.describe()}")
         return True, ""
 
     @staticmethod

@@ -1,6 +1,6 @@
 [project]
 name = "better-voice-typing"
-version = "1.0.0"
+version = "1.0.1"
 description = "Windows speech-to-text tray app: press Caps Lock, talk, and the text lands at your cursor"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -15,6 +15,7 @@ dependencies = [
     "websocket-client==1.9.0",   # OpenAI Realtime streaming dictation
     "numpy==2.0.2",
     "pyperclip==1.9.0",
+    "pycaw==20251023",           # Windows input-volume check for the recording device (modules/endpoint_volume.py)
     # Providers
     "openai==2.20.0",            # STT (OpenAI + OpenAI-compatible servers) and transcript cleaning
     "httpx==0.28.1",             # OpenAI STT timeouts
