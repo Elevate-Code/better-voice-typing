@@ -6,6 +6,15 @@
     {
       "category": "General",
       "date": "2026-09-18",
+      "version": "1.0.4",
+      "changes": [
+        "The indicator now counts down the last minute before a recording hits its length limit (“auto-stop in 0:45 · Caps to stop now”, or “auto-send” in Meeting and Phone mode). Until now the limit fired silently, and in a long meeting that meant a chunk of transcript pasted wherever the cursor happened to be. Now you see it coming and can send at a natural pause with Caps Lock.",
+        "Meeting and Phone mode chunks have their own length limit, on the Conversation page, defaulting to 30 minutes. The 15-minute dictation limit exists to keep OpenAI uploads under its 25 MB cap; conversation modes always use ElevenLabs, which accepts up to 10 hours, so there was no reason for them to share it."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-09-18",
       "version": "1.0.3",
       "changes": [
         "Fixed a crash introduced in 1.0.1: the app could close without warning on the second recording after launch, or a minute later while a transcription was being sent. The new Windows input-volume check released a system audio object twice, and the second release could happen at any time, on any thread. It now hands that object over the way Windows expects, and all such checks run on one dedicated thread for the life of the app. A test now guards the exact mistake.",

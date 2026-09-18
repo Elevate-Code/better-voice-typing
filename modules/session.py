@@ -70,6 +70,29 @@ def build_preamble(get: SettingsGetter, phone: bool) -> str:
     )
 
 
+COUNTDOWN_WINDOW_S = 60.0
+
+
+def countdown_note(remaining_s: Optional[float], session: bool,
+                   window_s: float = COUNTDOWN_WINDOW_S) -> str:
+    """Indicator note for the last minute before the length limit acts.
+
+    An auto-stop (dictation) or auto-send (session chunk) that fires without
+    warning pastes text wherever the cursor happens to be at that moment.
+    The countdown gives the user the moment back: they see it coming and
+    press Caps Lock to send when it suits them. Empty outside the window or
+    when there is no limit. The text changes once per second, so the sticky
+    warning layer repaints once per second and never more.
+    """
+    if remaining_s is None or remaining_s > window_s:
+        return ''
+    secs = max(0, int(remaining_s + 0.999))  # 0:01 stays visible until it fires
+    clock = f"{secs // 60}:{secs % 60:02d}"
+    if session:
+        return f"⏱ auto-send in {clock} · Caps to send now"
+    return f"⏱ auto-stop in {clock} · Caps to stop now"
+
+
 def _timer_schedule(delay_s: float, fn: Callable[[], None]) -> None:
     timer = threading.Timer(delay_s, fn)
     timer.daemon = True

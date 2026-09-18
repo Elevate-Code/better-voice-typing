@@ -317,7 +317,12 @@ class AudioRecorder:
         self.auto_stopped = False
         self.max_duration_reached = False
         self.error = None
-        self.max_duration = settings.get('max_recording_duration')
+        # A session chunk has its own cap: reaching it auto-sends the chunk
+        # and keeps recording (the watchdog rolls into a new chunk), whereas
+        # a dictation stops. Different consequences, different defaults.
+        self.max_duration = settings.get('session_chunk_max_duration'
+                                         if (self.meeting_mode or self.phone_mode)
+                                         else 'max_recording_duration')
         self.silence_start = None
         self.initial_sound_detected = False
         self._mic_first_block_time = None

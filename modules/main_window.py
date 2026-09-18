@@ -679,7 +679,9 @@ class DictationPage(Page):
         silent = _bind_spin(app, 'silent_start_timeout', 0, 60, 0.5, 1, ' s', none_at_zero=True)
         silent.valueChanged.connect(lambda v: setattr(app.recorder, 'silent_start_timeout', None if v == 0 else float(v)))
         card.add_row('Silent-start timeout', 'Stop automatically if nothing is heard at the start of a recording.', silent)
-        card.add_row('Maximum recording length', 'Stop and transcribe automatically after this long.',
+        card.add_row('Maximum recording length', 'Stop and transcribe automatically after this long. The indicator counts '
+                     'down the last minute, so you can stop at a good moment with Caps Lock. Meeting and Phone '
+                     'chunks have their own limit on the Conversation page.',
                      _bind_spin(app, 'max_recording_duration', 0, 180, 1, 1, ' min', none_at_zero=True, scale=60))
         self.body.addWidget(card)
 
@@ -744,6 +746,10 @@ class ConversationPage(Page):
         card.add_row('📞 Phone mode', 'Mic-only capture of an in-room conversation, diarized by voice.', self.phone)
         card.add_row('Transcript preamble', 'Prepend a short note for the LLM reading the transcript to the first chunk.',
                      _bind_check(app, 'session_preamble'))
+        card.add_row('Maximum chunk length', 'Send what has been recorded so far and keep going after this long. '
+                     'The indicator counts down the last minute, so you can send at a good moment with Caps Lock '
+                     'instead of having text land wherever the cursor is.',
+                     _bind_spin(app, 'session_chunk_max_duration', 0, 600, 1, 1, ' min', none_at_zero=True, scale=60))
         self.body.addWidget(card)
 
         card = Card('Speaker labels')

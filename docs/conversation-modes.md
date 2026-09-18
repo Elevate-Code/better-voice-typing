@@ -82,5 +82,6 @@ All in `Documents\VoiceTyping\settings.json` (tray → Settings → Open Setting
 ## Notes & limitations
 
 - Speaker attribution is good but not perfect: overlapping speech can land on the wrong side in Meeting Mode, and diarization quality varies with audio conditions in Phone Mode. The session preamble exists precisely so downstream readers treat labels as approximate.
+- A chunk is sent automatically after `session_chunk_max_duration` (30 minutes by default) and recording continues; the indicator counts down the last minute ("auto-send in 0:45 · Caps to send now") so you can send at a natural pause instead of having text land mid-sentence wherever the cursor is.
 - Chunks are independent API requests; very frequent sends make more (small) requests, infrequent sends make fewer, larger ones. Recordings auto-send at `max_recording_duration` (default 15 min) and keep rolling.
 - Meeting Mode's system-audio capture uses WASAPI loopback on the default output device — if you switch output devices mid-session, the old device keeps being captured until the next chunk.

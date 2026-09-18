@@ -470,3 +470,31 @@ def test_superseded_session_stays_quiet(tmp_path) -> None:
     time.sleep(0.05)
     assert host.cleared == 0 and host.failures == []
     assert shown[-1] == "📤 transcribing…"  # no further notes from the old session
+
+
+# --- countdown_note: the last-minute warning before the length limit acts ---
+
+from modules.session import countdown_note  # noqa: E402
+
+
+def test_countdown_is_silent_outside_the_last_minute_or_without_a_limit() -> None:
+    assert countdown_note(None, session=False) == ''
+    assert countdown_note(61.0, session=False) == ''
+    assert countdown_note(3600.0, session=True) == ''
+
+
+def test_countdown_names_the_action_for_the_mode() -> None:
+    assert countdown_note(45.0, session=True) == '⏱ auto-send in 0:45 · Caps to send now'
+    assert countdown_note(45.0, session=False) == '⏱ auto-stop in 0:45 · Caps to stop now'
+
+
+def test_countdown_rounds_up_so_it_never_shows_zero_early() -> None:
+    assert '1:00' in countdown_note(60.0, session=True)
+    assert '0:01' in countdown_note(0.2, session=True)
+    assert '0:00' in countdown_note(0.0, session=True)
+    assert '0:00' in countdown_note(-3.0, session=True)  # limit already firing
+
+
+def test_countdown_text_changes_only_once_per_second() -> None:
+    assert countdown_note(10.9, session=False) == countdown_note(10.1, session=False)
+    assert countdown_note(10.1, session=False) != countdown_note(9.9, session=False)

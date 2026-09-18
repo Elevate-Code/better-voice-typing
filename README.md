@@ -26,7 +26,7 @@ See the [CHANGELOG.json](CHANGELOG.json) file for latest changes or the [release
 - **Toggle Recording**: Caps Lock (Ctrl+Caps Lock to toggle Caps Lock on/off)
 - **Cancel Recording/Processing**: Click the recording indicator to cancel recording or transcription
 - **Copy Last Transcription**: If your cursor was misplaced, left-click tray icon to copy last transcription
-- The recording indicator shows elapsed recording time, and recordings auto-stop (and still transcribe) at a configurable maximum duration
+- The recording indicator shows elapsed recording time, and recordings auto-stop (and still transcribe) at a configurable maximum duration, with a one-minute countdown on the indicator so you can stop (or, in Meeting/Phone mode, send the chunk) at a moment of your choosing
 - Only one instance of the app can run at a time; launching it again shows a notice instead of a second conflicting instance
 
 ### Conversation capture: Meeting Mode & Phone Mode
@@ -77,6 +77,7 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 | `silent_start_timeout` | Duration in seconds to wait for sound at the beginning of a recording before automatically canceling. Set to `null` to disable. | `4.0` | `2.0` to `5.0` |
 | `silence_threshold` | The audio level (RMS) below which sound is considered silence. Lower values are more sensitive. | `0.01` | `0.005` (very quiet) to `0.02` (noisier) |
 | `max_recording_duration` | Maximum recording length in seconds; when reached, recording stops automatically and the captured audio is still transcribed. Set to `null` to disable. | `900.0` | `300.0`, `1200.0`, `null` |
+| `session_chunk_max_duration` | Meeting/Phone mode only: maximum length of one chunk in seconds; when reached, the chunk so far is sent for transcription and recording continues. The indicator counts down the last minute. Default 1800 (30 minutes); `null` disables. Sessions always use ElevenLabs, whose limit is 10 hours, so this is about when text gets pasted, not upload size. |
 | `log_retention_days` | Number of days to keep log files. | `60` | `14`, `90`, `null` (indefinitely) |
 | `log_transcript_text` | Whether log files include the transcript text itself. Set to `false` to keep dictated content out of logs. | `true` | `true`, `false` |
 | `stt_provider` | The speech-to-text service to use. `null` picks automatically: ElevenLabs if `ELEVENLABS_API_KEY` is set, otherwise OpenAI. | `null` (auto) | `"elevenlabs"`, `"openai"`, `"custom"` |

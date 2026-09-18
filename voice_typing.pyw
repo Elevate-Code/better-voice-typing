@@ -23,7 +23,7 @@ from modules import audio_level
 from modules.paths import RECORDINGS_DIR
 from modules.recorder import (AudioRecorder, ANALYSIS_ERROR_PREFIX,
                               DEFAULT_SILENT_START_TIMEOUT)
-from modules.session import ConversationSession, SessionNotes
+from modules.session import ConversationSession, SessionNotes, countdown_note
 from modules.settings import Settings, api_key_configured
 from modules.settings import startup_notes as settings_startup_notes
 from modules.sounds import play_if_enabled
@@ -776,12 +776,18 @@ class VoiceTypingApp:
         the main thread from the watchdog; SessionNotes.set_warning is
         idempotent, so an unchanged note never repaints.
         """
-        # The Windows input volume outranks the level verdicts: when it is
-        # low or muted it is the CAUSE of whatever the level looks like, and
-        # unlike the bands it names the fix. It also needs no settling time.
+        # Priority, highest first: the countdown to the length limit (the
+        # user has seconds to act on it), then the Windows input volume
+        # (when low or muted it is the CAUSE of whatever the level looks
+        # like, and unlike the bands it names the fix), then the level bands.
+        note = ''
+        if self.recorder.max_duration is not None and self.recorder.recording_start_time is not None:
+            remaining = self.recorder.max_duration - (time.time() - self.recorder.recording_start_time)
+            note = countdown_note(remaining, session=self._session_active)
         reading = self._endpoint_reading
         current = reading[1] if reading and reading[0] == self._recording_generation else None
-        note = endpoint_volume.volume_note(current)
+        if not note:
+            note = endpoint_volume.volume_note(current)
         tracker = self.recorder.level_tracker
         if not note and tracker.elapsed(time.monotonic()) >= self.LEVEL_NOTE_AFTER_S:
             verdict = tracker.verdict()

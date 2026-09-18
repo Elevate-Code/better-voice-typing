@@ -113,7 +113,8 @@ class Settings:
             # higher value would auto-stop quiet speech before anything is
             # analyzed, and that path keeps no retry candidate.
             'silence_threshold': 0.0025,  # RMS, 0.0025 = -52dB
-            'max_recording_duration': 900.0,  # Auto-stop (and still transcribe) after this many seconds; null to disable
+            'max_recording_duration': 900.0,  # Dictation: auto-stop (and still transcribe) after this many seconds; null to disable. 15 min keeps OpenAI uploads under its 25 MB cap
+            'session_chunk_max_duration': 1800.0,  # Meeting/Phone: auto-send the chunk so far and keep recording after this many seconds; null to disable. Sessions always go to ElevenLabs (10 h limit), so this is about paste timing, not upload size
 
             # 'elevenlabs', 'openai', 'custom', or null = auto (ElevenLabs
             # Scribe when ELEVENLABS_API_KEY is configured, else OpenAI)
