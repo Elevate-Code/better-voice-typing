@@ -39,7 +39,7 @@ wheels = [
 
 [[package]]
 name = "better-voice-typing"
-version = "1.0.4"
+version = "1.0.3"
 source = { virtual = "." }
 dependencies = [
     { name = "httpx" },
