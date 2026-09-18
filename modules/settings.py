@@ -179,6 +179,7 @@ class Settings:
             'tray_pinned_exe': None,  # Executable whose tray icon the app already promoted out of the overflow
             'sounds_enabled': False,  # Hidden (not in the UI): start/stop cues; output-device start-up latency swallowed them in testing
             'setup_completed': None,  # App version whose first-run setup was finished; null = show it
+            'last_run_version': None,  # App version of the previous launch; a change means an update just landed
 
             # Logging
             'log_retention_days': 60,

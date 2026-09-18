@@ -1200,10 +1200,27 @@ class VoiceTypingApp:
         elif result is False and attempt < 5:
             self.ui_feedback.after(5000, lambda: self._pin_tray_icon(attempt + 1))
 
+    def _announce_update(self) -> None:
+        """Tell the user an update landed. The install itself is silent and
+        the app simply disappears for a few seconds and comes back, so this
+        notice is the only confirmation they get that it worked (and the
+        version they are now on). Keyed on the previous launch's version,
+        so a fresh install says nothing."""
+        from modules.paths import app_version
+        current = app_version()
+        previous = self.settings.get('last_run_version')
+        if previous != current:
+            self.settings.set('last_run_version', current)
+        if previous and previous != current:
+            self.logger.info(f"Updated from v{previous} to v{current}")
+            self.ui_feedback.after(2500, lambda: self.ui_feedback.show_warning(
+                f"✅ Updated to v{current}", 6000))
+
     def run(self) -> None:
         # Start keyboard listener
         self.listener.start()
         self.ui_feedback.after(4000, self._pin_tray_icon)
+        self._announce_update()
         self._schedule_startup_update_check()
         if self.settings.get('setup_completed') is None:
             self.ui_feedback.after(800, lambda: self.show_main_window(setup=True))

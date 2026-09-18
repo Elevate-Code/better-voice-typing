@@ -103,3 +103,23 @@ def test_helper_waits_for_our_pid_then_installs_silently_and_relaunches() -> Non
     assert "goto wait" in script
     assert '"C:\\cache\\Setup.exe" /VERYSILENT' in script
     assert script.index("goto wait") < script.index("/VERYSILENT") < script.index("BetterVoiceTyping.exe")
+
+
+def test_helper_is_launched_with_a_hidden_console_not_detached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DETACHED_PROCESS helper has no console; from a windowed parent its
+    `tasklist | find` pipeline then hangs in a visible console window and the
+    installer never runs (the 1.0.0 -> 1.0.1 update failed exactly so).
+    CREATE_NO_WINDOW gives cmd one hidden console the pipeline can use."""
+    import subprocess
+    calls = []
+    monkeypatch.setattr(updater, "FROZEN", True)
+    monkeypatch.setattr(updater, "UPDATE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *a, **kw: calls.append((a, kw)))
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    with pytest.raises(SystemExit):
+        updater.launch_installer_and_exit(tmp_path / "Setup.exe")
+    (args, kwargs), = calls
+    assert args[0][:2] == ["cmd.exe", "/c"]
+    assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+    assert not kwargs["creationflags"] & subprocess.DETACHED_PROCESS
+    assert kwargs["stdin"] is subprocess.DEVNULL and kwargs["stdout"] is subprocess.DEVNULL

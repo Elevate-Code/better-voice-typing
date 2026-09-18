@@ -6,7 +6,9 @@ Flow (frozen builds only):
    to the update cache and verify its SHA-256 against the SHA256SUMS asset
    the release workflow publishes next to it.
 3. Write a tiny helper script that waits for this process to exit, runs the
-   installer silently, and relaunches the app; start it detached and exit.
+   installer silently, and relaunches the app; start it in its own hidden
+   console (CREATE_NO_WINDOW — see launch_installer_and_exit for why not
+   DETACHED_PROCESS) and exit.
 
 The app never overwrites its own program folder — Inno Setup does, once the
 process (and its single-instance mutex) is gone. Source checkouts don't
@@ -166,10 +168,22 @@ def launch_installer_and_exit(installer: Path) -> None:
     script = UPDATE_CACHE_DIR / "apply-update.cmd"
     script.write_text(helper_script(os.getpid(), installer, INSTALL_DIR / EXE_NAME),
                       encoding="utf-8")
+    # IMPORTANT: CREATE_NO_WINDOW, never DETACHED_PROCESS. A detached cmd.exe
+    # has no console at all, and from a windowed (frozen) parent its
+    # `tasklist | find` pipeline then hangs: each console tool allocates its
+    # own console window (the user sees terminals flashing) and `find` waits
+    # forever, so the installer never runs and the app never comes back —
+    # exactly what happened on the first real update (1.0.0 → 1.0.1,
+    # 2026-09-18). With CREATE_NO_WINDOW cmd owns one hidden console that
+    # the pipeline, timeout and the installer all share. The explicit NUL
+    # handles keep the child from inheriting anything odd from a windowed
+    # parent whose own standard handles are null.
     creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | \
-        getattr(subprocess, "DETACHED_PROCESS", 0)
+        getattr(subprocess, "CREATE_NO_WINDOW", 0)
     subprocess.Popen(["cmd.exe", "/c", str(script)], creationflags=creation_flags,
-                     close_fds=True, cwd=str(UPDATE_CACHE_DIR))
+                     close_fds=True, cwd=str(UPDATE_CACHE_DIR),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
     logger.info(f"Update helper started for {installer.name}; exiting to let it install")
     logging.shutdown()
     os._exit(0)
