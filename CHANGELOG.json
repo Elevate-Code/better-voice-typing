@@ -6,6 +6,15 @@
     {
       "category": "General",
       "date": "2026-09-18",
+      "version": "1.0.3",
+      "changes": [
+        "Fixed a crash introduced in 1.0.1: the app could close without warning on the second recording after launch, or a minute later while a transcription was being sent. The new Windows input-volume check released a system audio object twice, and the second release could happen at any time, on any thread. It now hands that object over the way Windows expects, and all such checks run on one dedicated thread for the life of the app. A test now guards the exact mistake.",
+        "Release notes on GitHub no longer lose their punctuation to encoding errors."
+      ]
+    },
+    {
+      "category": "General",
+      "date": "2026-09-18",
       "version": "1.0.2",
       "changes": [
         "Fixed the built-in updater. “Check for Updates” downloaded and verified the new installer correctly, then the app closed and nothing happened: the helper that waits for the app to exit was started without a console, so its process check hung in a terminal window that flashed on screen and the installer never ran. The helper now runs in a hidden console. Because the fix is in the helper itself, this one release has to be installed by hand from the releases page; updates after it apply automatically.",
@@ -37,7 +46,8 @@
         "Fixed a rare case where finishing a dictation while a Meeting or Phone session was still delivering could transcribe and paste the wrong recording.",
         "Quitting while a transcription was still uploading no longer leaves the app running invisibly in the background, where it would block the next launch or an update from installing.",
         "A settings file written by a newer version of the app is now left alone instead of being quietly stamped with the older version's number. That mattered if you ever ran a newer build and then an older one: the older build renumbered the file, and the newer build then re-ran setting changes it had already made."
-      ]
+      ],
+      "version": "1.0.1"
     },
     {
       "category": "General",

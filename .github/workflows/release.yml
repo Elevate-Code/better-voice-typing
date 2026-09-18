@@ -49,7 +49,8 @@ jobs:
           $exe = "dist\installer\BetterVoiceTyping-Setup-$v.exe"
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
           "$hash  BetterVoiceTyping-Setup-$v.exe" | Out-File -FilePath dist\installer\SHA256SUMS.txt -Encoding ascii
-          uv run python scripts/release_notes.py $v | Out-File -FilePath dist\installer\release_notes.md -Encoding utf8
+          # --out, not a pipe: PowerShell re-decodes piped stdout and turned the notes' em dashes into "?"
+          uv run python scripts/release_notes.py $v --out dist\installer\release_notes.md
 
       - name: Publish release
         uses: softprops/action-gh-release@v2

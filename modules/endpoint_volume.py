@@ -15,9 +15,10 @@ it reads the endpoint's master volume and mute flag once per recording and the
 indicator says "Windows mic volume is 42%" while the user is still speaking.
 
 Everything COM lives in ``read_input_volume``; ``match_endpoint`` and
-``volume_note`` are pure and tested. The read runs on its own thread
-(``check_async``) because COM must be initialised per thread and a recording
-start must never wait on it.
+``volume_note`` are pure and tested. Reads run on one persistent COM thread
+(``check_async`` → ``_ComWorker``): a recording start must never wait on
+COM, and COM objects must live and die on the thread that created them —
+see ``_ComWorker`` for the crash that taught us that.
 
 NOTE: this reads the endpoint (Settings > Sound > <device> > Input volume),
 not the per-app mixer slider, which does not exist for capture streams.
@@ -25,6 +26,7 @@ not the per-app mixer slider, which does not exist for capture streams.
 from __future__ import annotations
 
 import logging
+import queue
 import sys
 import threading
 from dataclasses import dataclass
@@ -86,7 +88,7 @@ def read_input_volume(device_name: Optional[str]) -> Optional[EndpointVolume]:
     ``check_async``)."""
     try:
         import warnings
-        from comtypes import CLSCTX_ALL, POINTER, cast
+        from comtypes import CLSCTX_ALL
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
         if device_name is None:
@@ -108,7 +110,16 @@ def read_input_volume(device_name: Optional[str]) -> Optional[EndpointVolume]:
             dev = capture[index]._dev
             name = capture[index].FriendlyName or device_name
         iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        volume = cast(iface, POINTER(IAudioEndpointVolume))
+        # IMPORTANT: QueryInterface, never ctypes/comtypes `cast`. `cast`
+        # makes a second owning wrapper for the SAME reference without an
+        # AddRef (comtypes' own source says so), and ties the two wrappers
+        # into a reference cycle: one Release happens on scope exit, the
+        # other whenever the cyclic GC finds the cycle, on any thread, into
+        # an already-freed object. That double release was the access
+        # violation in _ctypes.pyd that crashed 1.0.1/1.0.2 on the second
+        # recording, or 79 s later on the transcription thread. This is the
+        # pattern pycaw itself uses (AudioDevice.EndpointVolume).
+        volume = iface.QueryInterface(IAudioEndpointVolume)
         percent = int(round(volume.GetMasterVolumeLevelScalar() * 100))
         return EndpointVolume(name, percent, bool(volume.GetMute()))
     except Exception:
@@ -123,32 +134,71 @@ def _friendly_name(device: object) -> Optional[str]:
         return None
 
 
+class _ComWorker:
+    """The one thread that ever touches COM for this module.
+
+    This replaced a short-lived thread per read that initialised COM, did
+    the job, uninitialised COM and exited. The crash that prompted it (an
+    access violation in _ctypes on the second recording, or a minute later
+    on the transcription thread) turned out to be the double release
+    described in ``read_input_volume``, but the per-read thread made it
+    worse and is wrong on its own terms: a COM interface pointer belongs to
+    the apartment of the thread that created it, and that apartment was
+    being torn down while Python could still release the pointer later,
+    from whatever thread the garbage collector ran on. One persistent thread
+    keeps every COM object's apartment alive for the life of the process;
+    objects are created, used and released here by ordinary reference
+    counting. comtypes initialises COM on whichever thread first imports
+    it, so the import happens here and counts as this thread's one
+    CoInitialize; it is never balanced with CoUninitialize on purpose (the
+    thread lives until exit).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._queue: 'queue.Queue[Tuple[Optional[str], Callable[[Optional[EndpointVolume]], None]]]' = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+
+    def submit(self, device_name: Optional[str],
+               on_result: Callable[[Optional[EndpointVolume]], None]) -> None:
+        with self._lock:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name='endpoint-volume',
+                                                daemon=True)
+                self._thread.start()
+        self._queue.put((device_name, on_result))
+
+    def _run(self) -> None:
+        try:
+            # Exactly one CoInitialize for this thread: the import does it
+            # when comtypes has not been imported anywhere yet (its module
+            # body calls CoInitializeEx), otherwise we do. Calling both
+            # would leave the per-thread count at two, which is harmless
+            # for a thread that never uninitialises but is still wrong.
+            already_imported = 'comtypes' in sys.modules
+            import comtypes
+            if already_imported:
+                comtypes.CoInitialize()
+        except Exception:
+            logger.debug("COM unavailable; input volume checks disabled", exc_info=True)
+        while True:
+            device_name, on_result = self._queue.get()
+            try:
+                reading = read_input_volume(device_name)
+            except Exception:
+                reading = None
+            try:
+                on_result(reading)
+            except Exception:
+                logger.error("Input volume callback failed", exc_info=True)
+
+
+_worker = _ComWorker()
+
+
 def check_async(device_name: Optional[str],
                 on_result: Callable[[Optional[EndpointVolume]], None]) -> None:
-    """Read the volume on a short daemon thread and hand the result to
-    ``on_result`` from that thread. The callback must be thread-safe."""
-    def run() -> None:
-        # comtypes calls CoInitializeEx on whichever thread first imports it
-        # (its __init__ does so at import time). When that is this thread,
-        # the import IS our initialisation and a second call would leave the
-        # count unbalanced; when it was imported earlier, this thread still
-        # needs its own.
-        first_import = 'comtypes' not in sys.modules
-        import comtypes
-        initialised = first_import
-        if not first_import:
-            try:
-                comtypes.CoInitialize()
-                initialised = True
-            except Exception:
-                pass  # already initialised on this thread in another mode
-        try:
-            on_result(read_input_volume(device_name))
-        finally:
-            if initialised:
-                try:
-                    comtypes.CoUninitialize()
-                except Exception:
-                    pass
-
-    threading.Thread(target=run, name='endpoint-volume', daemon=True).start()
+    """Read the volume on the module's COM thread and hand the result to
+    ``on_result`` from that thread. The callback must be thread-safe and
+    quick: it runs before the next queued read."""
+    _worker.submit(device_name, on_result)
