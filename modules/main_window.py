@@ -1,8 +1,9 @@
 """Main window: first-run setup, settings pages and transcription history.
 
 One QMainWindow with a sidebar. On first run (``setup_completed`` unset) it
-opens in setup mode: three pages (provider key, microphone test, try it)
-with the sidebar hidden; finishing switches to the normal layout. Every
+opens in setup mode (provider key, microphone test, try it, and the
+usage-counts question while it is unanswered) with the sidebar hidden;
+finishing switches to the normal layout. Every
 control writes straight to Settings and applies live through the app's
 existing methods, so the tray menu and this window never disagree.
 
@@ -11,6 +12,7 @@ the tray (already main thread) or marshals through UIFeedback.
 """
 import logging
 import os
+import subprocess
 import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBo
                                QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from modules import startup, transcribe
+from modules import startup, telemetry, transcribe
 from modules.audio_manager import get_default_device_id, get_input_devices, names_match
 from modules.env_file import KEY_NAMES, is_placeholder, read_env, update_env, validate_key
 from modules.logger import get_log_dir
@@ -47,6 +49,8 @@ QLabel#bad { color: #c5221f; font-weight: 600; }
 QPushButton#primary { background: palette(text); color: palette(base); border-radius: 8px;
                       padding: 9px 22px; font-weight: 600; }
 QPushButton#primary:disabled { background: palette(mid); }
+QPushButton#link { border: none; background: transparent; color: palette(placeholder-text);
+                   text-decoration: underline; padding: 9px 6px; }
 QLabel#kbd { border: 1px solid palette(mid); border-radius: 5px; padding: 1px 6px;
              background: palette(base); font-weight: 600; }
 """
@@ -68,6 +72,7 @@ def muted(text: str) -> QLabel:
     lab = QLabel(text)
     lab.setObjectName('muted')
     lab.setWordWrap(True)
+    lab.setOpenExternalLinks(True)
     return lab
 
 
@@ -454,6 +459,59 @@ class MicPanel(QWidget):
         self.verdict.style().polish(self.verdict)
 
 
+class UsageConsentCard(QFrame):
+    """The one-time usage-counts question (modules/telemetry.py). Neither
+    answer is preselected: "Count me in" is the prominent button, "No thanks"
+    a quiet link, and either one calls ``on_answer``."""
+
+    def __init__(self, on_answer: Callable[[bool], None]) -> None:
+        super().__init__()
+        self.setObjectName('card')
+        vl = QVBoxLayout(self)
+        vl.setContentsMargins(18, 14, 18, 14)
+        vl.setSpacing(8)
+        title = QLabel(f'Help keep {APP_NAME} going?')
+        title.setObjectName('h2')
+        vl.addWidget(title)
+        for text in (
+                'I build this in my spare time. Knowing people actually use it is what keeps me '
+                'fixing and improving it.',
+                'If you say yes, the app sends one small anonymous ping a day with a random ID, the app '
+                "version, your speech provider's name, and usage counts (dictations, sessions, minutes, "
+                'errors). The server notes your country and nothing else about you. Never audio, text, '
+                'keys, or anything that identifies you.',
+                'Every ping is saved on your PC so you can see exactly what went out, and the code is '
+                f'<a href="{telemetry.SOURCE_URL}">one short file</a>. Ask Claude to read it if you want '
+                'a second opinion.'):
+            lab = QLabel(text)
+            lab.setWordWrap(True)
+            lab.setOpenExternalLinks(True)
+            vl.addWidget(lab)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 6, 0, 0)
+        yes = QPushButton('Count me in')
+        yes.setObjectName('primary')
+        yes.setDefault(True)
+        yes.clicked.connect(lambda: on_answer(True))
+        no = QPushButton('No thanks')
+        no.setObjectName('link')
+        no.setCursor(Qt.CursorShape.PointingHandCursor)
+        no.clicked.connect(lambda: on_answer(False))
+        row.addWidget(yes)
+        row.addWidget(no)
+        row.addStretch(1)
+        vl.addLayout(row)
+        vl.addWidget(muted('You can change this anytime in Settings › General.'))
+
+
+def open_sent_log() -> bool:
+    """Show telemetry_sent.jsonl in Notepad; False when nothing was sent yet."""
+    if not telemetry.SENT_LOG.exists():
+        return False
+    subprocess.Popen(['notepad.exe', str(telemetry.SENT_LOG)])
+    return True
+
+
 # ---- pages -------------------------------------------------------------------
 
 class Page(QWidget):
@@ -548,6 +606,8 @@ class HomePage(Page):
         super().__init__(f'Press Caps Lock to dictate anywhere',
                          'Text lands wherever your cursor is. Press Caps Lock again to stop.')
         self.app, self.window = app, window
+        self.consent = UsageConsentCard(self._answered)
+        self.body.addWidget(self.consent)
         card = Card('Status')
         self.provider = QLabel()
         self.mic = QLabel()
@@ -570,7 +630,12 @@ class HomePage(Page):
         self.body.addLayout(row)
         self.finish()
 
+    def _answered(self, wanted: bool) -> None:
+        self.app.set_telemetry_consent(wanted)
+        self.consent.hide()
+
     def refresh(self) -> None:
+        self.consent.setVisible(self.app.settings.get('telemetry_consent') is None)
         try:
             name = transcribe.get_current_provider()
             display = next((p['display_name'] for p in transcribe.get_available_providers()
@@ -640,9 +705,31 @@ class GeneralPage(Page):
                      _combo(LANGUAGES, app.settings.get('stt_language'),
                             lambda v: app.settings.set('stt_language', v)))
         self.body.addWidget(card)
+
+        card = Card('Usage stats')
+        self.usage = QCheckBox()
+        self.usage.stateChanged.connect(lambda s: app.set_telemetry_consent(bool(s)))
+        card.add_row('Share anonymous usage counts',
+                     'One ping a day: a random ID, app version, provider name, and how many dictations, '
+                     'sessions, minutes and errors. Never audio, text or keys. Turning it off deletes the ID.',
+                     self.usage)
+        sent = QPushButton('Show what was sent')
+        self.sent_status = muted('')
+        sent.clicked.connect(lambda: self.sent_status.setText('' if open_sent_log() else 'Nothing sent yet.'))
+        box = QWidget()
+        bl = QHBoxLayout(box)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addWidget(self.sent_status)
+        bl.addWidget(sent)
+        link = f'<a href="{telemetry.SOURCE_URL}">The code that sends it</a> (one short file).'
+        card.add_row('Every ping is logged on this PC', link, box)
+        self.body.addWidget(card)
         self.finish()
 
     def refresh(self) -> None:
+        self.usage.blockSignals(True)
+        self.usage.setChecked(self.app.settings.get('telemetry_consent') is True)
+        self.usage.blockSignals(False)
         self.mic.start()
 
     def leave(self) -> None:
@@ -861,8 +948,9 @@ class AdvancedPage(Page):
 # ---- setup wizard --------------------------------------------------------------
 
 class SetupWizard(QWidget):
-    """Three pages: provider key → microphone → try it. Finishing records
-    the app version in ``setup_completed``."""
+    """Pages: provider key → microphone → try it → usage question (only
+    while unanswered). Finishing records the app version in
+    ``setup_completed``."""
 
     def __init__(self, app, window: 'MainWindow') -> None:
         super().__init__()
@@ -938,17 +1026,30 @@ class SetupWizard(QWidget):
         p3.body.addWidget(card)
         p3.finish()
         self.stack.addWidget(p3)
+
+        # Page 4: the usage question. Its two buttons replace Finish, so
+        # there is no default answer to click through.
+        p4 = Page('One last thing')
+        p4.body.addWidget(UsageConsentCard(self._answered))
+        p4.finish()
+        self.stack.addWidget(p4)
         self._rec_timer = QTimer(self)
         self._rec_timer.setInterval(300)
         self._rec_timer.timeout.connect(self._sync_rec_button)
 
+    def _page_count(self) -> int:
+        asked = self.app.settings.get('telemetry_consent') is not None
+        return self.stack.count() - 1 if asked else self.stack.count()
+
     def go(self, index: int) -> None:
-        index = max(0, min(self.stack.count() - 1, index))
+        count = self._page_count()
+        index = max(0, min(count - 1, index))
         self._leave(self.stack.currentIndex())
         self.stack.setCurrentIndex(index)
-        self.steps.setText(f'Step {index + 1} of {self.stack.count()}')
+        self.steps.setText(f'Step {index + 1} of {count}')
         self.back.setVisible(index > 0)
-        self.next.setText('Finish' if index == self.stack.count() - 1 else 'Continue')
+        self.next.setText('Finish' if index == count - 1 else 'Continue')
+        self.next.setVisible(index != self.stack.count() - 1)  # the usage question has its own buttons
         if index == 0:
             self.keys.refresh()
         elif index == 1:
@@ -963,8 +1064,12 @@ class SetupWizard(QWidget):
         elif index == 2:
             self._rec_timer.stop()
 
+    def _answered(self, wanted: bool) -> None:
+        self.app.set_telemetry_consent(wanted)
+        self.finish()
+
     def _next(self) -> None:
-        if self.stack.currentIndex() == self.stack.count() - 1:
+        if self.stack.currentIndex() == self._page_count() - 1:
             self.finish()
         else:
             self.go(self.stack.currentIndex() + 1)

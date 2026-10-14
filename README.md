@@ -87,6 +87,12 @@ While most settings can be controlled from the tray menu, you can fine-tune the 
 | `openai_stt_model` | The specific model to use for OpenAI's service. `gpt-4o-transcribe` is recommended for highest accuracy. | `"gpt-4o-transcribe"` | `"gpt-4o-transcribe"`, `"gpt-4o-mini-transcribe"` |
 | `clipboard_restore_delay_ms` | How long after pasting to wait before restoring your previous clipboard contents. Increase if slow apps paste your old clipboard instead of the transcript. | `300` | `100` to `1000` |
 
+## Privacy and usage stats
+
+Your audio goes only to the speech-to-text provider you configure, with your own key. The app has no account and no server of its own, with one optional exception: anonymous usage counts, which it asks about once and never sends unless you say yes.
+
+If you opt in, it sends one ping a day with a random ID, the app version, the provider name, and counts of dictations, sessions, minutes and errors. Never audio, transcripts, keys, device names or file paths. The server keeps one row per install per day plus the country Cloudflare derives from the connection; it does not store IP addresses. The client is [`modules/telemetry.py`](modules/telemetry.py) and the server is [`server/telemetry/`](server/telemetry/). Every ping that was sent is logged in `Documents\VoiceTyping\telemetry_sent.jsonl`. Turn it off under **General → Usage stats**, which also deletes the ID.
+
 ## Technical Details
 - Small Qt (PySide6) UI: a recording indicator, a tray icon and a settings window
 - Multi-provider Speech-to-Text support: ElevenLabs Scribe, OpenAI GPT-4o models, Whisper, and custom local/remote servers

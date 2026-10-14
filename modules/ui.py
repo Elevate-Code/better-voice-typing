@@ -181,6 +181,8 @@ class UIFeedback:
         self.on_click_callback: Optional[Callable[[], None]] = None
         self.on_retry_callback: Optional[Callable[[], None]] = None
         self.retry_available = False
+        # Click handler of the current action notice (show_action_notice)
+        self._notice_action: Optional[Callable[[], None]] = None
 
         # Live status (what the pill shows when no notice overrides it)
         self._status: Optional[StatusConfig] = None
@@ -383,7 +385,12 @@ class UIFeedback:
         self.on_retry_callback = callback
 
     def _handle_click(self) -> None:
-        if self.retry_available and self.on_retry_callback:
+        if self._notice_action is not None:
+            action = self._notice_action
+            self._notice_timer.stop()
+            self._end_notice()
+            action()
+        elif self.retry_available and self.on_retry_callback:
             self.retry_available = False
             self.on_retry_callback()
         elif self.on_click_callback:
@@ -536,8 +543,17 @@ class UIFeedback:
         """Notice whose click retries the last recording until dismissed. Thread-safe."""
         self._call_on_ui_thread(lambda: self._show_notice(message, duration_ms, retry=True))
 
+    def show_action_notice(self, message: str, action: Callable[[], None],
+                           duration_ms: int = 10000) -> None:
+        """Notice whose click runs ``action`` once and dismisses it. Thread-safe."""
+        def impl() -> None:
+            self._show_notice(message, duration_ms, retry=False)
+            self._notice_action = action
+        self._call_on_ui_thread(impl)
+
     def _show_notice(self, message: str, duration_ms: int, retry: bool) -> None:
         self._notice_timer.stop()
+        self._notice_action = None
         self._notice_active = True
         self.retry_available = retry
         self._notice_text = f"{message}\n🔄 Click to retry" if retry else message
@@ -548,6 +564,7 @@ class UIFeedback:
     def _end_notice(self) -> None:
         self._notice_active = False
         self.retry_available = False
+        self._notice_action = None
         if self.pulsing:
             # A live status (recording/processing) continues underneath
             self._paint_all()

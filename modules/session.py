@@ -232,8 +232,11 @@ class ConversationSession:
     def __init__(self, *, phone: bool, settings_get: SettingsGetter,
                  notes: SessionNotes, host: SessionHost,
                  transcribe_fn: Callable[[str], str],
-                 retry_delay: float = RETRY_DELAY_S) -> None:
+                 retry_delay: float = RETRY_DELAY_S,
+                 on_chunk_failed: Optional[Callable[[], None]] = None) -> None:
         self.phone = phone
+        # Called once per chunk that failed for good (usage counts)
+        self._on_chunk_failed = on_chunk_failed
         # True until the app ends the session (recording stopped); queued
         # chunks may still be delivering afterwards
         self.live = True
@@ -350,6 +353,8 @@ class ConversationSession:
         failure = describe_transcription_error(error) if error else None
         if failure and not failure.silent:
             self._last_failure = failure
+            if self._on_chunk_failed is not None:
+                self._on_chunk_failed()
         reason = f" — {failure.short}" if failure else ""
         if self._on_screen():
             self._notes.set_alert(f"⚠️ chunk {index} failed{reason}", 6.0)

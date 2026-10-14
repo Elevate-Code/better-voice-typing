@@ -1,0 +1,14 @@
+name = "bvt-telemetry"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+workers_dev = false
+routes = [{ pattern = "bvt-telemetry.elevatecode.io", custom_domain = true }]
+
+# No request logs: the Worker keeps only what it writes to D1
+[observability]
+enabled = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "bvt-telemetry"
+database_id = "83e179fa-6426-4e77-b8df-49c7babe4f0c"

@@ -5,6 +5,13 @@
   "changelog": [
     {
       "category": "General",
+      "date": "2026-10-13",
+      "changes": [
+        "You can now choose to share anonymous usage counts. The app asks once, at the end of setup or (after this update) through a small note on the indicator that points to a card on the Home page, and nothing is sent unless you say yes. If you do, it sends one ping a day with a random ID, the app version, your speech provider's name, and how many dictations, sessions, minutes and errors you had. Never audio, text, keys or anything that identifies you. Every ping is saved in Documents\\VoiceTyping\\telemetry_sent.jsonl so you can see exactly what went out, and you can turn it off any time under General, which also deletes the ID."
+      ]
+    },
+    {
+      "category": "General",
       "date": "2026-09-18",
       "changes": [
         "The indicator now counts down the last minute before a recording hits its length limit (“auto-stop in 0:45 · Caps to stop now”, or “auto-send” in Meeting and Phone mode). Until now the limit fired silently, and in a long meeting that meant a chunk of transcript pasted wherever the cursor happened to be. Now you see it coming and can send at a natural pause with Caps Lock.",

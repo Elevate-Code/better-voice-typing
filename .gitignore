@@ -122,3 +122,5 @@ dmypy.json
 
 # pytype static type analyzer
 .pytype/
+# Cloudflare Worker local state (server/telemetry)
+.wrangler/

@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 import subprocess
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 import logging
 from pathlib import Path
 import json
@@ -27,13 +27,14 @@ from modules.session import ConversationSession, SessionNotes, countdown_note
 from modules.settings import Settings, api_key_configured
 from modules.settings import startup_notes as settings_startup_notes
 from modules.sounds import play_if_enabled
-from modules.transcribe import transcribe_audio, is_conversation_recording
+from modules.transcribe import transcribe_audio, is_conversation_recording, get_current_provider
 from modules.tray import setup_tray_icon
 from modules.tray_pin import promote_tray_icon
 from modules.ui import UIFeedback
 from modules.audio_manager import (set_input_device, get_default_device_id, get_input_device,
                                    get_device_by_id, DeviceIdentifier, find_device_by_identifier)
 from modules import endpoint_volume
+from modules import telemetry
 from modules.status_manager import StatusManager, AppStatus, RECORDING_STATUSES
 from modules.screen_utils import hide_console_window
 from modules.logger import setup_logging
@@ -111,6 +112,10 @@ class VoiceTypingApp:
         self._hotkey = CapsLockHotkey()
         self.clean_transcription_enabled = self.settings.get('clean_transcription')
         self.history = TranscriptionHistory()
+        # Opt-in anonymous usage counts; inert unless telemetry_consent is True
+        self.telemetry = telemetry.Telemetry(
+            consent=lambda: self.settings.get('telemetry_consent'),
+            describe=self._telemetry_fields)
 
         self.processing_thread: Optional[threading.Thread] = None
         self.cancel_flag = threading.Event()
@@ -505,6 +510,7 @@ class VoiceTypingApp:
                 is_valid, reason = self.recorder.analyze_recording(snapshot)
                 if is_valid:
                     index = self._session.submit(snapshot)
+                    self.telemetry.add_audio(telemetry.wav_seconds(snapshot))
                     self.logger.info(f"Chunk {index} queued for transcription")
                 elif reason.startswith(ANALYSIS_ERROR_PREFIX):
                     # We could not read the file, which says nothing about
@@ -568,6 +574,7 @@ class VoiceTypingApp:
                             # whether the user spoke, and this tail is the
                             # audio captured right before the device died.
                             index = session.submit(snapshot)
+                            self.telemetry.add_audio(telemetry.wav_seconds(snapshot))
                             self.logger.info(
                                 f"Salvaged session tail as chunk {index} after recording error")
                         else:
@@ -589,6 +596,7 @@ class VoiceTypingApp:
                 )
                 self.logger.warning("Session auto-stopped due to initial silence")
                 return
+            self.telemetry.record('phone_sessions' if session.phone else 'meeting_sessions')
             if error:
                 # Queued chunks (and any salvaged tail) still deliver in
                 # order; only new recording is dead
@@ -615,7 +623,8 @@ class VoiceTypingApp:
     def _start_session(self, phone: bool) -> ConversationSession:
         session = ConversationSession(
             phone=phone, settings_get=self.settings.get, notes=self._notes,
-            host=self, transcribe_fn=transcribe_audio)
+            host=self, transcribe_fn=transcribe_audio,
+            on_chunk_failed=lambda: self.telemetry.record('failures'))
         # Sweep protection: keep sessions that still hold files (draining, or
         # failures kept for retry) rather than capping by count, so a
         # slow-draining session can't lose its files to a sweep
@@ -901,6 +910,7 @@ class VoiceTypingApp:
                 result = result.strip()
                 self.history.add(result)
                 self.ui_feedback.insert_text(result)
+                self.telemetry.record('dictations', telemetry.wav_seconds(path))
                 if self.update_icon_menu:
                     self.update_icon_menu()
                 self.status_manager.set_status(AppStatus.IDLE)
@@ -939,6 +949,7 @@ class VoiceTypingApp:
             failure = TranscriptionFailure("⚠️ Transcription failed")
         if failure.silent:
             return
+        self.telemetry.record('failures')
         # Order matters: both calls repaint the indicator label via the UI
         # queue, and the ERROR status only knows the short line. The retry
         # overlay must land last so the hint and "🔄 Click to retry" survive.
@@ -1046,6 +1057,7 @@ class VoiceTypingApp:
                     result = result.strip()
                     self.history.add(result)
                     pyperclip.copy(result)  # Copy to clipboard instead of direct insertion
+                    self.telemetry.record('dictations', telemetry.wav_seconds(recording_path))
                     self.status_manager.set_status(AppStatus.IDLE)
                     self.ui_feedback.show_warning("✅ Transcription copied to clipboard", 3000)
                     # Update the menu to reflect the new transcription in history
@@ -1221,6 +1233,46 @@ class VoiceTypingApp:
             self.logger.info(f"Updated from v{previous} to v{current}")
             self.ui_feedback.after(2500, lambda: self.ui_feedback.show_warning(
                 f"✅ Updated to v{current}", 6000))
+            if self.settings.get('telemetry_consent') is None:
+                self.ui_feedback.after(9000, self._ask_usage_consent)
+
+    def _ask_usage_consent(self) -> None:
+        """Point an existing user at the usage-counts question on Home. A
+        notice, never a window: popping a focus-stealing window in an app
+        that pastes at the cursor could swallow what they are typing."""
+        if self.recording or self.settings.get('telemetry_consent') is not None:
+            return
+        self.ui_feedback.show_action_notice(
+            "💬 A quick question from the developer\nClick to see it",
+            self.show_main_window, 15000)
+
+    # --- Usage counts (modules/telemetry.py) ----------------------------------
+
+    def _telemetry_fields(self) -> Dict[str, str]:
+        try:
+            provider = get_current_provider() or ''
+        except Exception:
+            provider = ''
+        return {'app': updater.current_version(),
+                'build': 'installer' if updater.running_as_installed() else 'source',
+                'provider': provider}
+
+    def set_telemetry_consent(self, wanted: bool) -> None:
+        """The user's answer, from the window. Opting out forgets the install
+        ID and unsent counts; opting in sends the first ping right away."""
+        self.settings.set('telemetry_consent', wanted)
+        if wanted:
+            self.logger.info("Usage counts: opted in")
+            threading.Thread(target=self.telemetry.send_if_due, daemon=True).start()
+        else:
+            self.logger.info("Usage counts: opted out")
+            self.telemetry.forget()
+
+    def _telemetry_tick(self) -> None:
+        """Hourly; the ping itself goes out at most once a day (the tray app
+        often stays up for days, so a startup-only check would miss it)."""
+        threading.Thread(target=self.telemetry.send_if_due, daemon=True).start()
+        self.ui_feedback.after(3600 * 1000, self._telemetry_tick)
 
     def run(self) -> None:
         # Start keyboard listener
@@ -1228,6 +1280,7 @@ class VoiceTypingApp:
         self.ui_feedback.after(4000, self._pin_tray_icon)
         self._announce_update()
         self._schedule_startup_update_check()
+        self.ui_feedback.after(60 * 1000, self._telemetry_tick)
         if self.settings.get('setup_completed') is None:
             self.ui_feedback.after(800, lambda: self.show_main_window(setup=True))
 
